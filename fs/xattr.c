@@ -38,6 +38,13 @@ xattr_permission(struct inode *inode, const char *name, int mask)
 	if (mask & MAY_WRITE) {
 		if (IS_IMMUTABLE(inode) || IS_APPEND(inode))
 			return -EPERM;
+		/*
+		 * Updating an xattr will likely cause i_uid and i_gid
+		 * to be writen back improperly if their true value is
+		 * unknown to the vfs.
+		 */
+		if (HAS_UNMAPPED_ID(inode))
+			return -EPERM;
 	}
 
 	/*
@@ -163,7 +170,7 @@ xattr_getsecurity(struct inode *inode, const char *name, void *value,
 	}
 	memcpy(value, buffer, len);
 out:
-	security_release_secctx(buffer, len);
+	kfree(buffer);
 out_noalloc:
 	return len;
 }
@@ -207,6 +214,7 @@ vfs_getxattr_alloc(struct dentry *dentry, const char *name, char **xattr_value,
 	*xattr_value = value;
 	return error;
 }
+EXPORT_SYMBOL(vfs_getxattr_alloc);
 
 /* Compare an extended attribute value with the given value */
 int vfs_xattr_cmp(struct dentry *dentry, const char *xattr_name,
@@ -298,18 +306,18 @@ vfs_removexattr(struct dentry *dentry, const char *name)
 
 	mutex_lock(&inode->i_mutex);
 	error = security_inode_removexattr(dentry, name);
-	if (error) {
-		mutex_unlock(&inode->i_mutex);
-		return error;
-	}
+	if (error)
+		goto out;
 
 	error = inode->i_op->removexattr(dentry, name);
-	mutex_unlock(&inode->i_mutex);
 
 	if (!error) {
 		fsnotify_xattr(dentry);
 		evm_inode_post_removexattr(dentry, name);
 	}
+
+out:
+	mutex_unlock(&inode->i_mutex);
 	return error;
 }
 EXPORT_SYMBOL_GPL(vfs_removexattr);
@@ -442,7 +450,7 @@ getxattr(struct dentry *d, const char __user *name, void __user *value,
 			size = XATTR_SIZE_MAX;
 		kvalue = kzalloc(size, GFP_KERNEL | __GFP_NOWARN);
 		if (!kvalue) {
-			vvalue = vmalloc(size);
+			vvalue = vzalloc(size);
 			if (!vvalue)
 				return -ENOMEM;
 			kvalue = vvalue;
@@ -720,7 +728,7 @@ generic_getxattr(struct dentry *dentry, const char *name, void *buffer, size_t s
 	handler = xattr_resolve_name(dentry->d_sb->s_xattr, &name);
 	if (!handler)
 		return -EOPNOTSUPP;
-	return handler->get(dentry, name, buffer, size, handler->flags);
+	return handler->get(handler, dentry, name, buffer, size);
 }
 
 /*
@@ -735,15 +743,15 @@ generic_listxattr(struct dentry *dentry, char *buffer, size_t buffer_size)
 
 	if (!buffer) {
 		for_each_xattr_handler(handlers, handler) {
-			size += handler->list(dentry, NULL, 0, NULL, 0,
-					      handler->flags);
+			size += handler->list(handler, dentry, NULL, 0,
+					      NULL, 0);
 		}
 	} else {
 		char *buf = buffer;
 
 		for_each_xattr_handler(handlers, handler) {
-			size = handler->list(dentry, buf, buffer_size,
-					     NULL, 0, handler->flags);
+			size = handler->list(handler, dentry, buf, buffer_size,
+					     NULL, 0);
 			if (size > buffer_size)
 				return -ERANGE;
 			buf += size;
@@ -767,7 +775,7 @@ generic_setxattr(struct dentry *dentry, const char *name, const void *value, siz
 	handler = xattr_resolve_name(dentry->d_sb->s_xattr, &name);
 	if (!handler)
 		return -EOPNOTSUPP;
-	return handler->set(dentry, name, value, size, flags, handler->flags);
+	return handler->set(handler, dentry, name, value, size, flags);
 }
 
 /*
@@ -782,14 +790,37 @@ generic_removexattr(struct dentry *dentry, const char *name)
 	handler = xattr_resolve_name(dentry->d_sb->s_xattr, &name);
 	if (!handler)
 		return -EOPNOTSUPP;
-	return handler->set(dentry, name, NULL, 0,
-			    XATTR_REPLACE, handler->flags);
+	return handler->set(handler, dentry, name, NULL, 0, XATTR_REPLACE);
 }
 
 EXPORT_SYMBOL(generic_getxattr);
 EXPORT_SYMBOL(generic_listxattr);
 EXPORT_SYMBOL(generic_setxattr);
 EXPORT_SYMBOL(generic_removexattr);
+
+/**
+ * xattr_full_name  -  Compute full attribute name from suffix
+ *
+ * @handler:	handler of the xattr_handler operation
+ * @name:	name passed to the xattr_handler operation
+ *
+ * The get and set xattr handler operations are called with the remainder of
+ * the attribute name after skipping the handler's prefix: for example, "foo"
+ * is passed to the get operation of a handler with prefix "user." to get
+ * attribute "user.foo".  The full name is still "there" in the name though.
+ *
+ * Note: the list xattr handler operation when called from the vfs is passed a
+ * NULL name; some file systems use this operation internally, with varying
+ * semantics.
+ */
+const char *xattr_full_name(const struct xattr_handler *handler,
+			    const char *name)
+{
+	size_t prefix_len = strlen(handler->prefix);
+
+	return name - prefix_len;
+}
+EXPORT_SYMBOL(xattr_full_name);
 
 /*
  * Allocate new xattr and copy in the value; but leave the name to callers.

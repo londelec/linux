@@ -14,6 +14,7 @@
 
 #include <linux/types.h>
 #include "ctype.h"
+#include "string.h"
 
 int memcmp(const void *s1, const void *s2, size_t len)
 {
@@ -30,7 +31,7 @@ int strcmp(const char *str1, const char *str2)
 	int delta = 0;
 
 	while (*s1 || *s2) {
-		delta = *s2 - *s1;
+		delta = *s1 - *s2;
 		if (delta)
 			return delta;
 		s1++;

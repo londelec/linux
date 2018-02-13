@@ -35,6 +35,7 @@
 #include <linux/acpi.h>
 #include <linux/string.h>
 #include <linux/dmi.h>
+#include <acpi/video.h>
 
 MODULE_AUTHOR("Matthew Garrett <mjg@redhat.com>");
 MODULE_DESCRIPTION("Dell laptop WMI hotkeys driver");
@@ -88,6 +89,9 @@ static const struct key_entry dell_wmi_legacy_keymap[] __initconst = {
 	/* Shortcut and audio panel keys */
 	{ KE_IGNORE, 0xe025, { KEY_RESERVED } },
 	{ KE_IGNORE, 0xe026, { KEY_RESERVED } },
+
+	/* LCD Display On/Off Control key */
+	{ KE_KEY,    0xe027, { KEY_DISPLAYTOGGLE } },
 
 	{ KE_IGNORE, 0xe02e, { KEY_VOLUMEDOWN } },
 	{ KE_IGNORE, 0xe030, { KEY_VOLUMEUP } },
@@ -397,7 +401,7 @@ static int __init dell_wmi_init(void)
 	}
 
 	dmi_walk(find_hk_type, NULL);
-	acpi_video = acpi_video_backlight_support();
+	acpi_video = acpi_video_get_backlight_type() != acpi_backlight_vendor;
 
 	err = dell_wmi_input_setup();
 	if (err)

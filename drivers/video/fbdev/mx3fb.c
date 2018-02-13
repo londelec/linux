@@ -61,12 +61,6 @@
 #define SDC_COM_BG_EN		0x00000200UL
 #define SDC_COM_SHARP		0x00001000UL
 
-#define SDC_PWM_SRC_HSYNC_CLK	0x00000000UL
-#define SDC_PWM_SRC_PXL_CLK	0x02000000UL
-#define SDC_PWM_SRC_HSP_CLK	0x04000000UL
-#define SDC_PWM_CC_EN		0x01000000UL
-#define SDC_PWM_PWM_MSK		0x00FF0000UL
-
 #define SDC_V_SYNC_WIDTH_L	0x00000001UL
 
 /* Display Interface registers */
@@ -245,7 +239,6 @@ static const struct fb_videomode mx3fb_modedb[] = {
 struct mx3fb_data {
 	struct fb_info		*fbi;
 	int			backlight_level;
-	int			pwm_clk_src;	/* clock source for PWM */
 	void __iomem		*reg_base;
 	spinlock_t		lock;
 	struct device		*dev;
@@ -277,8 +270,6 @@ struct mx3fb_info {
 	dma_cookie_t			cookie;
 	struct scatterlist		sg[2];
 
-	u32				sync;	/* preserve var->sync flags */
-	struct backlight_device		*backlight;
 	struct fb_var_screeninfo	cur_var; /* current var info */
 };
 
@@ -716,9 +707,7 @@ static void sdc_set_brightness(struct mx3fb_data *mx3fb, uint8_t value)
 {
 	dev_dbg(mx3fb->dev, "%s: value = %d\n", __func__, value);
 	/* This might be board-specific */
-	u32 reg = mx3fb->pwm_clk_src | SDC_PWM_CC_EN | value << 16;
-
-	mx3fb_write_reg(mx3fb, reg, SDC_PWM_CTRL);
+	mx3fb_write_reg(mx3fb, 0x03000000UL | value << 16, SDC_PWM_CTRL);
 	return;
 }
 
@@ -1325,88 +1314,6 @@ static int mx3fb_resume(struct platform_device *pdev)
 #define mx3fb_resume    NULL
 #endif
 
-#ifdef CONFIG_BACKLIGHT_LCD_SUPPORT
-/*
- * Backlight device
- */
-static int mx3fb_bl_update_status(struct backlight_device *bl)
-{
-	struct mx3fb_info *fbi = bl_get_data(bl);
-	struct mx3fb_data *mx3fb = fbi->mx3fb;
-	int brightness;
-
-	if (bl->props.power != FB_BLANK_UNBLANK ||
-	    bl->props.fb_blank != FB_BLANK_UNBLANK)
-		brightness = 0;
-	else
-		brightness = bl->props.brightness;
-
-	mx3fb->backlight_level = brightness;
-	sdc_set_brightness(mx3fb, mx3fb->backlight_level);
-	return 0;
-}
-
-static int mx3fb_bl_get_brightness(struct backlight_device *bl)
-{
-	struct mx3fb_info *fbi = bl_get_data(bl);
-	struct mx3fb_data *mx3fb = fbi->mx3fb;
-        uint32_t reg;
-
-        reg = mx3fb_read_reg(mx3fb, SDC_PWM_CTRL);
-
-	return (reg & SDC_PWM_PWM_MSK) >> 16;
-}
-
-static struct backlight_ops mx3fb_bl_ops = {
-	.update_status = mx3fb_bl_update_status,
-	.get_brightness = mx3fb_bl_get_brightness,
-};
-
-static void mx3fb_init_backlight(struct mx3fb_info *fbi)
-{
-	struct backlight_device	*bl;
-	struct mx3fb_data *mx3fb = fbi->mx3fb;
-
-	/*
-	 * COM57H5M10XRC supports max. 300Hz for PDM, so
-	 * we use HSYNC as clock source.
-	 */
-	if (fb_mode && !strncmp(fb_mode, "COM57H5M10XRC", 13))
-		mx3fb->pwm_clk_src = SDC_PWM_SRC_HSYNC_CLK;
-
-	if (fbi->backlight)
-		return;
-
-	bl = backlight_device_register("mx3fb", mx3fb->dev,
-				       fbi, &mx3fb_bl_ops);
-	if (IS_ERR(bl)) {
-		dev_err(mx3fb->dev, "register backlight failed: %ld\n",
-			PTR_ERR(bl));
-		return;
-	}
-	fbi->backlight = bl;
-
-	bl->props.power = FB_BLANK_UNBLANK;
-	bl->props.fb_blank = FB_BLANK_UNBLANK;
-	bl->props.max_brightness = 0xff;
-	bl->props.brightness = 0xff;
-}
-
-static void mx3fb_exit_backlight(struct mx3fb_info *fbi)
-{
-	if (fbi->backlight)
-		backlight_device_unregister(fbi->backlight);
-}
-#else
-static inline void mx3fb_init_backlight(struct mx3fb_info *fbi)
-{
-}
-
-static inline void mx3fb_exit_backlight(struct mx3fb_info *fbi)
-{
-}
-#endif
-
 /*
  * Main framebuffer functions
  */
@@ -1598,8 +1505,6 @@ static int init_fb_chan(struct mx3fb_data *mx3fb, struct idmac_channel *ichan)
 	if (ret < 0)
 		goto esetpar;
 
-	mx3fb_init_backlight(mx3fbi);
-
 	__blank(FB_BLANK_UNBLANK, fbi);
 
 	dev_info(dev, "registered, using mode %s\n", fb_mode);
@@ -1611,7 +1516,6 @@ static int init_fb_chan(struct mx3fb_data *mx3fb, struct idmac_channel *ichan)
 	return 0;
 
 erfb:
-	mx3fb_exit_backlight(mx3fbi);
 esetpar:
 emode:
 	fb_dealloc_cmap(&fbi->cmap);
@@ -1700,7 +1604,6 @@ static int mx3fb_probe(struct platform_device *pdev)
 	}
 
 	mx3fb->backlight_level = 255;
-	mx3fb->pwm_clk_src = SDC_PWM_SRC_PXL_CLK;
 
 	ret = init_fb_chan(mx3fb, to_idmac_chan(chan));
 	if (ret < 0)
@@ -1728,7 +1631,6 @@ static int mx3fb_remove(struct platform_device *dev)
 	struct dma_chan *chan;
 
 	chan = &mx3_fbi->idmac_channel->dma_chan;
-	mx3fb_exit_backlight(mx3_fbi);
 	release_fbi(fbi);
 
 	mx3fb_exit_backlight(mx3fb);

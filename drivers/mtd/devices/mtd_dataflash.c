@@ -102,6 +102,7 @@ static const struct of_device_id dataflash_dt_ids[] = {
 	{ .compatible = "atmel,dataflash", },
 	{ /* sentinel */ }
 };
+MODULE_DEVICE_TABLE(of, dataflash_dt_ids);
 #endif
 
 /* ......................................................................... */
@@ -181,7 +182,7 @@ static int dataflash_erase(struct mtd_info *mtd, struct erase_info *instr)
 		/* Calculate flash page address; use block erase (for speed) if
 		 * we're at a block boundary and need to erase the whole block.
 		 */
-		pageaddr = div_u64(instr->len, priv->page_size);
+		pageaddr = div_u64(instr->addr, priv->page_size);
 		do_block = (pageaddr & 0x7) == 0 && instr->len >= blocksize;
 		pageaddr = pageaddr << priv->page_offset;
 
@@ -647,7 +648,6 @@ static int add_dataflash_otp(struct spi_device *spi, char *name, int nr_pages,
 	device->size = nr_pages * pagesize;
 	device->erasesize = pagesize;
 	device->writesize = pagesize;
-	device->owner = THIS_MODULE;
 	device->type = MTD_DATAFLASH;
 	device->flags = MTD_WRITEABLE;
 	device->_erase = dataflash_erase;
@@ -910,7 +910,6 @@ static int dataflash_remove(struct spi_device *spi)
 static struct spi_driver dataflash_driver = {
 	.driver = {
 		.name		= "mtd_dataflash",
-		.owner		= THIS_MODULE,
 		.of_match_table = of_match_ptr(dataflash_dt_ids),
 	},
 

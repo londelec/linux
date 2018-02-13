@@ -23,7 +23,6 @@
 
 #include <linux/fs.h>
 #include <linux/string.h>
-#include <linux/buffer_head.h>
 #include <linux/crc-itu-t.h>
 
 #include "udf_i.h"
@@ -105,6 +104,8 @@ struct genericFormat *udf_add_extendedattr(struct inode *inode, uint32_t size,
 					iinfo->i_lenEAttr) {
 				uint32_t aal =
 					le32_to_cpu(eahd->appAttrLocation);
+
+				osb();
 				memmove(&ea[offset - aal + size],
 					&ea[aal], offset - aal);
 				offset -= aal;
@@ -115,6 +116,8 @@ struct genericFormat *udf_add_extendedattr(struct inode *inode, uint32_t size,
 					iinfo->i_lenEAttr) {
 				uint32_t ial =
 					le32_to_cpu(eahd->impAttrLocation);
+
+				osb();
 				memmove(&ea[offset - ial + size],
 					&ea[ial], offset - ial);
 				offset -= ial;
@@ -126,6 +129,8 @@ struct genericFormat *udf_add_extendedattr(struct inode *inode, uint32_t size,
 					iinfo->i_lenEAttr) {
 				uint32_t aal =
 					le32_to_cpu(eahd->appAttrLocation);
+
+				osb();
 				memmove(&ea[offset - aal + size],
 					&ea[aal], offset - aal);
 				offset -= aal;

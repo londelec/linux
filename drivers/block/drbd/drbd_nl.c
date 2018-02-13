@@ -1156,25 +1156,27 @@ static void drbd_setup_queue_param(struct drbd_device *device, struct drbd_backi
 			/* For now, don't allow more than one activity log extent worth of data
 			 * to be discarded in one go. We may need to rework drbd_al_begin_io()
 			 * to allow for even larger discard ranges */
-			q->limits.max_discard_sectors = DRBD_MAX_DISCARD_SECTORS;
+			blk_queue_max_discard_sectors(q, DRBD_MAX_DISCARD_SECTORS);
 
 			queue_flag_set_unlocked(QUEUE_FLAG_DISCARD, q);
 			/* REALLY? Is stacking secdiscard "legal"? */
 			if (blk_queue_secdiscard(b))
 				queue_flag_set_unlocked(QUEUE_FLAG_SECDISCARD, q);
 		} else {
-			q->limits.max_discard_sectors = 0;
+			blk_queue_max_discard_sectors(q, 0);
 			queue_flag_clear_unlocked(QUEUE_FLAG_DISCARD, q);
 			queue_flag_clear_unlocked(QUEUE_FLAG_SECDISCARD, q);
 		}
 
 		blk_queue_stack_limits(q, b);
 
-		if (q->backing_dev_info.ra_pages != b->backing_dev_info.ra_pages) {
+		if (q->backing_dev_info->ra_pages !=
+		    b->backing_dev_info->ra_pages) {
 			drbd_info(device, "Adjusting my ra_pages to backing device's (%lu -> %lu)\n",
-				 q->backing_dev_info.ra_pages,
-				 b->backing_dev_info.ra_pages);
-			q->backing_dev_info.ra_pages = b->backing_dev_info.ra_pages;
+				 q->backing_dev_info->ra_pages,
+				 b->backing_dev_info->ra_pages);
+			q->backing_dev_info->ra_pages =
+						b->backing_dev_info->ra_pages;
 		}
 	}
 }

@@ -993,10 +993,6 @@ static int ace_setup(struct ace_device *ace)
 	if (ace->queue == NULL)
 		goto err_blk_initq;
 	blk_queue_logical_block_size(ace->queue, 512);
-#ifdef CONFIG_PPC_256K_PAGES
-	blk_queue_max_phys_segments(ace->queue, 1);
-	blk_queue_max_hw_segments(ace->queue, 1);
-#endif
 
 	/*
 	 * Allocate and initialize GD structure

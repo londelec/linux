@@ -1295,7 +1295,7 @@ static int do_otp_write(struct map_info *map, struct flchip *chip, loff_t adr,
 		unsigned long bus_ofs = adr & ~(map_bankwidth(map)-1);
 		int gap = adr - bus_ofs;
 		int n = min_t(int, len, map_bankwidth(map) - gap);
-		map_word datum;
+		map_word datum = map_word_ff(map);
 
 		if (n != map_bankwidth(map)) {
 			/* partial write of a word, load old contents */
@@ -1601,9 +1601,6 @@ static int __xipram do_write_oneword(struct map_info *map, struct flchip *chip,
 	cfi_send_gen_cmd(0xAA, cfi->addr_unlock1, chip->start, map, cfi, cfi->device_type, NULL);
 	cfi_send_gen_cmd(0x55, cfi->addr_unlock2, chip->start, map, cfi, cfi->device_type, NULL);
 	cfi_send_gen_cmd(0xA0, cfi->addr_unlock1, chip->start, map, cfi, cfi->device_type, NULL);
-#if defined(CONFIG_SC3)
-	datum.x[0] = (((datum.x[0] >> 8)) + ((datum.x[0] & 0xff) << 8));
-#endif
 	map_write(map, datum, adr);
 	chip->state = mode;
 

@@ -1888,7 +1888,6 @@ mptsas_slave_alloc(struct scsi_device *sdev)
 	return -ENXIO;
 
  out:
-	blk_queue_update_dma_alignment(sdev->request_queue, 511);
 	vdevice->vtarget->num_luns++;
 	sdev->hostdata = vdevice;
 	return 0;
@@ -1995,7 +1994,6 @@ static struct scsi_host_template mptsas_driver_template = {
 	.cmd_per_lun			= 7,
 	.use_clustering			= ENABLE_CLUSTERING,
 	.shost_attrs			= mptscsih_host_attrs,
-	.use_blk_tags			= 1,
 };
 
 static int mptsas_get_linkerrors(struct sas_phy *phy)
@@ -4091,7 +4089,7 @@ mptsas_handle_queue_full_event(struct fw_event_work *fw_event)
 					continue;
 				}
 				depth = scsi_track_queue_full(sdev,
-				    current_depth - 1);
+					sdev->queue_depth - 1);
 				if (depth > 0)
 					sdev_printk(KERN_INFO, sdev,
 					"Queue depth reduced to (%d)\n",
@@ -4101,7 +4099,7 @@ mptsas_handle_queue_full_event(struct fw_event_work *fw_event)
 					"Tagged Command Queueing is being "
 					"disabled\n");
 				else if (depth == 0)
-					sdev_printk(KERN_INFO, sdev,
+					sdev_printk(KERN_DEBUG, sdev,
 					"Queue depth not changed yet\n");
 			}
 		}
@@ -4353,11 +4351,10 @@ mptsas_hotplug_work(MPT_ADAPTER *ioc, struct fw_event_work *fw_event,
 			return;
 
 		phy_info = mptsas_refreshing_device_handles(ioc, &sas_device);
-		/* Only For SATA Device ADD */
-		if (!phy_info && (sas_device.device_info &
-				MPI_SAS_DEVICE_INFO_SATA_DEVICE)) {
+		/* Device hot plug */
+		if (!phy_info) {
 			devtprintk(ioc, printk(MYIOC_s_DEBUG_FMT
-				"%s %d SATA HOT PLUG: "
+				"%s %d HOT PLUG: "
 				"parent handle of device %x\n", ioc->name,
 				__func__, __LINE__, sas_device.handle_parent));
 			port_info = mptsas_find_portinfo_by_handle(ioc,

@@ -108,16 +108,14 @@ xfs_attr_shortform_list(xfs_attr_list_context_t *context)
 					   (int)sfe->namelen,
 					   (int)sfe->valuelen,
 					   &sfe->nameval[sfe->namelen]);
-
+			if (error)
+				return error;
 			/*
 			 * Either search callback finished early or
 			 * didn't fit it all in the buffer after all.
 			 */
 			if (context->seen_enough)
 				break;
-
-			if (error)
-				return error;
 			sfe = XFS_ATTR_SF_NEXTENTRY(sfe);
 		}
 		trace_xfs_attr_list_sf_all(context);
@@ -202,8 +200,10 @@ xfs_attr_shortform_list(xfs_attr_list_context_t *context)
 					sbp->namelen,
 					sbp->valuelen,
 					&sbp->name[sbp->namelen]);
-		if (error)
+		if (error) {
+			kmem_free(sbuf);
 			return error;
+		}
 		if (context->seen_enough)
 			break;
 		cursor->offset++;
@@ -225,6 +225,7 @@ xfs_attr_node_list(xfs_attr_list_context_t *context)
 	int error, i;
 	struct xfs_buf *bp;
 	struct xfs_inode	*dp = context->dp;
+	struct xfs_mount	*mp = dp->i_mount;
 
 	trace_xfs_attr_node_list(context);
 
@@ -256,7 +257,8 @@ xfs_attr_node_list(xfs_attr_list_context_t *context)
 			case XFS_ATTR_LEAF_MAGIC:
 			case XFS_ATTR3_LEAF_MAGIC:
 				leaf = bp->b_addr;
-				xfs_attr3_leaf_hdr_from_disk(&leafhdr, leaf);
+				xfs_attr3_leaf_hdr_from_disk(mp->m_attr_geo,
+							     &leafhdr, leaf);
 				entries = xfs_attr3_leaf_entryp(leaf);
 				if (cursor->hashval > be32_to_cpu(
 						entries[leafhdr.count - 1].hashval)) {
@@ -340,7 +342,7 @@ xfs_attr_node_list(xfs_attr_list_context_t *context)
 			xfs_trans_brelse(NULL, bp);
 			return error;
 		}
-		xfs_attr3_leaf_hdr_from_disk(&leafhdr, leaf);
+		xfs_attr3_leaf_hdr_from_disk(mp->m_attr_geo, &leafhdr, leaf);
 		if (context->seen_enough || leafhdr.forw == 0)
 			break;
 		cursor->blkno = leafhdr.forw;
@@ -368,11 +370,12 @@ xfs_attr3_leaf_list_int(
 	struct xfs_attr_leaf_entry	*entry;
 	int				retval;
 	int				i;
+	struct xfs_mount		*mp = context->dp->i_mount;
 
 	trace_xfs_attr_list_leaf(context);
 
 	leaf = bp->b_addr;
-	xfs_attr3_leaf_hdr_from_disk(&ichdr, leaf);
+	xfs_attr3_leaf_hdr_from_disk(mp->m_attr_geo, &ichdr, leaf);
 	entries = xfs_attr3_leaf_entryp(leaf);
 
 	cursor = context->cursor;
@@ -451,14 +454,13 @@ xfs_attr3_leaf_list_int(
 				args.rmtblkcnt = xfs_attr3_rmt_blocks(
 							args.dp->i_mount, valuelen);
 				retval = xfs_attr_rmtval_get(&args);
-				if (retval)
-					return retval;
-				retval = context->put_listent(context,
-						entry->flags,
-						name_rmt->name,
-						(int)name_rmt->namelen,
-						valuelen,
-						args.value);
+				if (!retval)
+					retval = context->put_listent(context,
+							entry->flags,
+							name_rmt->name,
+							(int)name_rmt->namelen,
+							valuelen,
+							args.value);
 				kmem_free(args.value);
 			} else {
 				retval = context->put_listent(context,
@@ -508,7 +510,7 @@ xfs_attr_list_int(
 	xfs_inode_t *dp = context->dp;
 	uint		lock_mode;
 
-	XFS_STATS_INC(xs_attr_list);
+	XFS_STATS_INC(dp->i_mount, xs_attr_list);
 
 	if (XFS_FORCED_SHUTDOWN(dp->i_mount))
 		return -EIO;
@@ -577,7 +579,7 @@ xfs_attr_put_listent(
 		trace_xfs_attr_list_full(context);
 		alist->al_more = 1;
 		context->seen_enough = 1;
-		return 1;
+		return 0;
 	}
 
 	aep = (attrlist_ent_t *)&context->alist[context->firstu];

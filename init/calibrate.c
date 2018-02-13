@@ -8,7 +8,6 @@
 #include <linux/delay.h>
 #include <linux/init.h>
 #include <linux/timex.h>
-#include <linux/nmi.h>
 #include <linux/smp.h>
 #include <linux/percpu.h>
 
@@ -299,7 +298,6 @@ void calibrate_delay(void)
 			pr_info("Calibrating delay using timer "
 				"specific routine.. ");
 	} else {
-		touch_nmi_watchdog();
 		if (!printed)
 			pr_info("Calibrating delay loop... ");
 		lpj = calibrate_delay_converge();

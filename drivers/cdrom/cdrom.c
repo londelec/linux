@@ -289,7 +289,7 @@ static bool debug;
 /* default compatibility mode */
 static bool autoclose=1;
 static bool autoeject;
-static bool lockdoor = 1;
+static bool lockdoor = 0;
 /* will we ever get to use this... sigh. */
 static bool check_media_type;
 /* automatically restart mrw format */
@@ -885,6 +885,7 @@ static int cdrom_is_dvd_rw(struct cdrom_device_info *cdi)
 	switch (cdi->mmc3_profile) {
 	case 0x12:	/* DVD-RAM	*/
 	case 0x1A:	/* DVD+RW	*/
+	case 0x43:	/* BD-RE	*/
 		return 0;
 	default:
 		return 1;

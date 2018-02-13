@@ -102,12 +102,14 @@
 #include <linux/uaccess.h>
 #include <linux/kdb.h>
 #include <linux/ctype.h>
+#include <linux/screen_info.h>
 
 #define MAX_NR_CON_DRIVER 16
 
 #define CON_DRIVER_FLAG_MODULE 1
 #define CON_DRIVER_FLAG_INIT   2
 #define CON_DRIVER_FLAG_ATTR   4
+#define CON_DRIVER_FLAG_ZOMBIE 8
 
 struct con_driver {
 	const struct consw *con;
@@ -135,6 +137,7 @@ const struct consw *conswitchp;
  */
 #define DEFAULT_BELL_PITCH	750
 #define DEFAULT_BELL_DURATION	(HZ/8)
+#define DEFAULT_CURSOR_BLINK_MS	200
 
 struct vc vc_cons [MAX_NR_CONSOLES];
 
@@ -144,7 +147,7 @@ static const struct consw *con_driver_map[MAX_NR_CONSOLES];
 
 static int con_open(struct tty_struct *, struct file *);
 static void vc_init(struct vc_data *vc, unsigned int rows,
-		    unsigned int cols, int do_clear);
+		    unsigned int cols, int do_clear, int mode);
 static void gotoxy(struct vc_data *vc, int new_x, int new_y);
 static void save_cur(struct vc_data *vc);
 static void reset_terminal(struct vc_data *vc, int do_clear);
@@ -153,6 +156,7 @@ static int set_vesa_blanking(char __user *p);
 static void set_cursor(struct vc_data *vc);
 static void hide_cursor(struct vc_data *vc);
 static void console_callback(struct work_struct *ignored);
+static void con_driver_unregister_callback(struct work_struct *ignored);
 static void blank_screen_t(unsigned long dummy);
 static void set_palette(struct vc_data *vc);
 
@@ -167,6 +171,9 @@ module_param(global_cursor_default, int, S_IRUGO | S_IWUSR);
 static int cur_default = CUR_DEFAULT;
 module_param(cur_default, int, S_IRUGO | S_IWUSR);
 
+int vt_handoff = 0;
+module_param_named(handoff, vt_handoff, int, S_IRUGO | S_IWUSR);
+
 /*
  * ignore_poke: don't unblank the screen when things are typed.  This is
  * mainly for the privacy of braille terminal users.
@@ -177,15 +184,12 @@ int do_poke_blanked_console;
 int console_blanked;
 
 static int vesa_blank_mode; /* 0:none 1:suspendV 2:suspendH 3:powerdown */
-#ifndef CONFIG_FB_PRE_INIT_FB
-static int blankinterval = 10*60;
-#else
-static int blankinterval = 0;
-#endif
 static int vesa_off_interval;
+static int blankinterval = 10*60;
 core_param(consoleblank, blankinterval, int, 0444);
 
 static DECLARE_WORK(console_work, console_callback);
+static DECLARE_WORK(con_driver_unregister_work, con_driver_unregister_callback);
 
 /*
  * fg_console is the current virtual console,
@@ -504,6 +508,7 @@ void invert_screen(struct vc_data *vc, int offset, int count, int viewed)
 #endif
 	if (DO_UPDATE(vc))
 		do_update_region(vc, (unsigned long) p, count);
+	notify_update(vc);
 }
 
 /* used by selection: complement pointer position */
@@ -520,6 +525,7 @@ void complement_pos(struct vc_data *vc, int offset)
 		scr_writew(old, screenpos(vc, old_offset, 1));
 		if (DO_UPDATE(vc))
 			vc->vc_sw->con_putc(vc, old, oldy, oldx);
+		notify_update(vc);
 	}
 
 	old_offset = offset;
@@ -537,8 +543,8 @@ void complement_pos(struct vc_data *vc, int offset)
 			oldy = (offset >> 1) / vc->vc_cols;
 			vc->vc_sw->con_putc(vc, new, oldy, oldx);
 		}
+		notify_update(vc);
 	}
-
 }
 
 static void insert_char(struct vc_data *vc, unsigned int nr)
@@ -682,6 +688,13 @@ void redraw_screen(struct vc_data *vc, int is_switch)
 		}
 		if (tty0dev)
 			sysfs_notify(&tty0dev->kobj, NULL, "active");
+		/*
+		 * If we are switching away from a transparent VT the contents
+		 * will be lost, convert it into a blank text console then
+		 * it will be repainted blank if we ever switch back.
+		 */
+		if (old_vc->vc_mode == KD_TRANSPARENT)
+			old_vc->vc_mode = KD_TEXT;
 	} else {
 		hide_cursor(vc);
 		redraw = 1;
@@ -704,12 +717,11 @@ void redraw_screen(struct vc_data *vc, int is_switch)
 			update_attr(vc);
 			clear_buffer_attributes(vc);
 		}
-#ifndef CONFIG_FB_PRE_INIT_FB
+
 		/* Forcibly update if we're panicing */
 		if ((update && vc->vc_mode != KD_GRAPHICS) ||
 		    vt_force_oops_output(vc))
 			do_update_region(vc, vc->vc_origin, vc->vc_screenbuf_size / 2);
-#endif
 	}
 	set_cursor(vc);
 	if (is_switch) {
@@ -741,12 +753,15 @@ static void visual_init(struct vc_data *vc, int num, int init)
 	__module_get(vc->vc_sw->owner);
 	vc->vc_num = num;
 	vc->vc_display_fg = &master_display_fg;
+	if (vc->vc_uni_pagedir_loc)
+		con_free_unimap(vc);
 	vc->vc_uni_pagedir_loc = &vc->vc_uni_pagedir;
 	vc->vc_uni_pagedir = NULL;
 	vc->vc_hi_font_mask = 0;
 	vc->vc_complement_mask = 0;
 	vc->vc_can_do_color = 0;
 	vc->vc_panic_force_write = false;
+	vc->vc_cur_blink_ms = DEFAULT_CURSOR_BLINK_MS;
 	vc->vc_sw->con_init(vc, init);
 	if (!vc->vc_complement_mask)
 		vc->vc_complement_mask = vc->vc_can_do_color ? 0x7700 : 0x0800;
@@ -790,16 +805,13 @@ int vc_allocate(unsigned int currcons)	/* return 0 on success */
 		vc_cons[currcons].d = NULL;
 		return -ENOMEM;
 	    }
-#ifdef CONFIG_FB_PRE_INIT_FB
-	    vc_init(vc, vc->vc_rows, vc->vc_cols, 0);
-#else
+
 	    /* If no drivers have overridden us and the user didn't pass a
 	       boot option, default to displaying the cursor */
 	    if (global_cursor_default == -1)
 		    global_cursor_default = 1;
 
-	    vc_init(vc, vc->vc_rows, vc->vc_cols, 1);
-#endif
+	    vc_init(vc, vc->vc_rows, vc->vc_cols, 1, KD_TEXT);
 	    vcs_make_sysfs(currcons);
 	    atomic_notifier_call_chain(&vt_notifier_list, VT_ALLOCATE, &param);
 	}
@@ -871,9 +883,14 @@ static int vc_do_resize(struct tty_struct *tty, struct vc_data *vc,
 	if (new_cols == vc->vc_cols && new_rows == vc->vc_rows)
 		return 0;
 
+	if (new_screen_size > (4 << 20))
+		return -EINVAL;
 	newscreen = kmalloc(new_screen_size, GFP_USER);
 	if (!newscreen)
 		return -ENOMEM;
+
+	if (vc == sel_cons)
+		clear_selection();
 
 	old_rows = vc->vc_rows;
 	old_row_size = vc->vc_size_row;
@@ -1172,7 +1189,7 @@ static void csi_J(struct vc_data *vc, int vpar)
 			break;
 		case 3: /* erase scroll-back buffer (and whole display) */
 			scr_memsetw(vc->vc_screenbuf, vc->vc_video_erase_char,
-				    vc->vc_screenbuf_size >> 1);
+				    vc->vc_screenbuf_size);
 			set_origin(vc);
 			if (CON_IS_VISIBLE(vc))
 				update_screen(vc);
@@ -1243,7 +1260,7 @@ static void default_attr(struct vc_data *vc)
 
 struct rgb { u8 r; u8 g; u8 b; };
 
-struct rgb rgb_from_256(int i)
+static struct rgb rgb_from_256(int i)
 {
 	struct rgb c;
 	if (i < 8) {            /* Standard colours. */
@@ -1579,7 +1596,7 @@ static void setterm_command(struct vc_data *vc)
 		case 11: /* set bell duration in msec */
 			if (vc->vc_npar >= 1)
 				vc->vc_bell_duration = (vc->vc_par[1] < 2000) ?
-					vc->vc_par[1] * HZ / 1000 : 0;
+					msecs_to_jiffies(vc->vc_par[1]) : 0;
 			else
 				vc->vc_bell_duration = DEFAULT_BELL_DURATION;
 			break;
@@ -1595,6 +1612,13 @@ static void setterm_command(struct vc_data *vc)
 			break;
 		case 15: /* activate the previous console */
 			set_console(last_console);
+			break;
+		case 16: /* set cursor blink duration in msec */
+			if (vc->vc_npar >= 1 && vc->vc_par[1] >= 50 &&
+					vc->vc_par[1] <= USHRT_MAX)
+				vc->vc_cur_blink_ms = vc->vc_par[1];
+			else
+				vc->vc_cur_blink_ms = DEFAULT_CURSOR_BLINK_MS;
 			break;
 	}
 }
@@ -1723,6 +1747,7 @@ static void reset_terminal(struct vc_data *vc, int do_clear)
 
 	vc->vc_bell_pitch = DEFAULT_BELL_PITCH;
 	vc->vc_bell_duration = DEFAULT_BELL_DURATION;
+	vc->vc_cur_blink_ms = DEFAULT_CURSOR_BLINK_MS;
 
 	gotoxy(vc, 0, 0);
 	save_cur(vc);
@@ -2694,13 +2719,13 @@ int tioclinux(struct tty_struct *tty, unsigned long arg)
 	 * related to the kernel should not use this.
 	 */
 			data = vt_get_shift_state();
-			ret = __put_user(data, p);
+			ret = put_user(data, p);
 			break;
 		case TIOCL_GETMOUSEREPORTING:
 			console_lock();	/* May be overkill */
 			data = mouse_reporting();
 			console_unlock();
-			ret = __put_user(data, p);
+			ret = put_user(data, p);
 			break;
 		case TIOCL_SETVESABLANK:
 			console_lock();
@@ -2709,7 +2734,7 @@ int tioclinux(struct tty_struct *tty, unsigned long arg)
 			break;
 		case TIOCL_GETKMSGREDIRECT:
 			data = vt_get_kmsg_redirect();
-			ret = __put_user(data, p);
+			ret = put_user(data, p);
 			break;
 		case TIOCL_SETKMSGREDIRECT:
 			if (!capable(CAP_SYS_ADMIN)) {
@@ -2919,7 +2944,7 @@ module_param_named(italic, default_italic_color, int, S_IRUGO | S_IWUSR);
 module_param_named(underline, default_underline_color, int, S_IRUGO | S_IWUSR);
 
 static void vc_init(struct vc_data *vc, unsigned int rows,
-		    unsigned int cols, int do_clear)
+		    unsigned int cols, int do_clear, int mode)
 {
 	int j, k ;
 
@@ -2930,7 +2955,7 @@ static void vc_init(struct vc_data *vc, unsigned int rows,
 
 	set_origin(vc);
 	vc->vc_pos = vc->vc_origin;
-	reset_vc(vc);
+	reset_vc(vc, mode);
 	for (j=k=0; j<16; j++) {
 		vc->vc_palette[k++] = default_red[j] ;
 		vc->vc_palette[k++] = default_grn[j] ;
@@ -2987,16 +3012,32 @@ static int __init con_init(void)
 		mod_timer(&console_timer, jiffies + (blankinterval * HZ));
 	}
 
+	if (vt_handoff > 0 && vt_handoff <= MAX_NR_CONSOLES) {
+		currcons = vt_handoff - 1;
+		vc_cons[currcons].d = vc = kzalloc(sizeof(struct vc_data), GFP_NOWAIT);
+		INIT_WORK(&vc_cons[currcons].SAK_work, vc_SAK);
+		tty_port_init(&vc->port);
+		visual_init(vc, currcons, 1);
+		vc->vc_screenbuf = kzalloc(vc->vc_screenbuf_size, GFP_NOWAIT);
+		vc_init(vc, vc->vc_rows, vc->vc_cols, 0, KD_TRANSPARENT);
+	}
 	for (currcons = 0; currcons < MIN_NR_CONSOLES; currcons++) {
+		if (currcons == vt_handoff - 1)
+			continue;
 		vc_cons[currcons].d = vc = kzalloc(sizeof(struct vc_data), GFP_NOWAIT);
 		INIT_WORK(&vc_cons[currcons].SAK_work, vc_SAK);
 		tty_port_init(&vc->port);
 		visual_init(vc, currcons, 1);
 		vc->vc_screenbuf = kzalloc(vc->vc_screenbuf_size, GFP_NOWAIT);
 		vc_init(vc, vc->vc_rows, vc->vc_cols,
-			currcons || !vc->vc_sw->con_save_screen);
+			currcons || !vc->vc_sw->con_save_screen, KD_TEXT);
 	}
 	currcons = fg_console = 0;
+	if (vt_handoff > 0) {
+		printk(KERN_INFO "vt handoff: transparent VT on vt#%d\n",
+								vt_handoff);
+		currcons = fg_console = vt_handoff - 1;
+	}
 	master_display_fg = vc = vc_cons[currcons].d;
 	set_origin(vc);
 	save_screen(vc);
@@ -3047,17 +3088,24 @@ static ssize_t show_tty_active(struct device *dev,
 }
 static DEVICE_ATTR(active, S_IRUGO, show_tty_active, NULL);
 
+static struct attribute *vt_dev_attrs[] = {
+	&dev_attr_active.attr,
+	NULL
+};
+
+ATTRIBUTE_GROUPS(vt_dev);
+
 int __init vty_init(const struct file_operations *console_fops)
 {
 	cdev_init(&vc0_cdev, console_fops);
 	if (cdev_add(&vc0_cdev, MKDEV(TTY_MAJOR, 0), 1) ||
 	    register_chrdev_region(MKDEV(TTY_MAJOR, 0), 1, "/dev/vc/0") < 0)
 		panic("Couldn't register /dev/tty0 driver\n");
-	tty0dev = device_create(tty_class, NULL, MKDEV(TTY_MAJOR, 0), NULL, "tty0");
+	tty0dev = device_create_with_groups(tty_class, NULL,
+					    MKDEV(TTY_MAJOR, 0), NULL,
+					    vt_dev_groups, "tty0");
 	if (IS_ERR(tty0dev))
 		tty0dev = NULL;
-	else
-		WARN_ON(device_create_file(tty0dev, &dev_attr_active) < 0);
 
 	vcs_init();
 
@@ -3191,22 +3239,6 @@ err:
 
 
 #ifdef CONFIG_VT_HW_CONSOLE_BINDING
-static int con_is_graphics(const struct consw *csw, int first, int last)
-{
-	int i, retval = 0;
-
-	for (i = first; i <= last; i++) {
-		struct vc_data *vc = vc_cons[i].d;
-
-		if (vc && vc->vc_mode == KD_GRAPHICS) {
-			retval = 1;
-			break;
-		}
-	}
-
-	return retval;
-}
-
 /* unlocked version of unbind_con_driver() */
 int do_unbind_con_driver(const struct consw *csw, int first, int last, int deflt)
 {
@@ -3292,8 +3324,7 @@ static int vt_bind(struct con_driver *con)
 	const struct consw *defcsw = NULL, *csw = NULL;
 	int i, more = 1, first = -1, last = -1, deflt = 0;
 
- 	if (!con->con || !(con->flag & CON_DRIVER_FLAG_MODULE) ||
-	    con_is_graphics(con->con, con->first, con->last))
+ 	if (!con->con || !(con->flag & CON_DRIVER_FLAG_MODULE))
 		goto err;
 
 	csw = con->con;
@@ -3326,11 +3357,8 @@ static int vt_bind(struct con_driver *con)
 		if (first == 0 && last == MAX_NR_CONSOLES -1)
 			deflt = 1;
 
-		if (first != -1) {
-			console_lock();
+		if (first != -1)
 			do_bind_con_driver(csw, first, last, deflt);
-			console_unlock();
-		}
 
 		first = -1;
 		last = -1;
@@ -3347,8 +3375,7 @@ static int vt_unbind(struct con_driver *con)
 	int i, more = 1, first = -1, last = -1, deflt = 0;
 	int ret;
 
- 	if (!con->con || !(con->flag & CON_DRIVER_FLAG_MODULE) ||
-	    con_is_graphics(con->con, con->first, con->last))
+ 	if (!con->con || !(con->flag & CON_DRIVER_FLAG_MODULE))
 		goto err;
 
 	csw = con->con;
@@ -3370,9 +3397,7 @@ static int vt_unbind(struct con_driver *con)
 			deflt = 1;
 
 		if (first != -1) {
-			console_lock();
 			ret = do_unbind_con_driver(csw, first, last, deflt);
-			console_unlock();
 			if (ret != 0)
 				return ret;
 		}
@@ -3402,10 +3427,14 @@ static ssize_t store_bind(struct device *dev, struct device_attribute *attr,
 	struct con_driver *con = dev_get_drvdata(dev);
 	int bind = simple_strtoul(buf, NULL, 0);
 
+	console_lock();
+
 	if (bind)
 		vt_bind(con);
 	else
 		vt_unbind(con);
+
+	console_unlock();
 
 	return count;
 }
@@ -3430,42 +3459,26 @@ static ssize_t show_name(struct device *dev, struct device_attribute *attr,
 
 }
 
-static struct device_attribute device_attrs[] = {
-	__ATTR(bind, S_IRUGO|S_IWUSR, show_bind, store_bind),
-	__ATTR(name, S_IRUGO, show_name, NULL),
+static DEVICE_ATTR(bind, S_IRUGO|S_IWUSR, show_bind, store_bind);
+static DEVICE_ATTR(name, S_IRUGO, show_name, NULL);
+
+static struct attribute *con_dev_attrs[] = {
+	&dev_attr_bind.attr,
+	&dev_attr_name.attr,
+	NULL
 };
+
+ATTRIBUTE_GROUPS(con_dev);
 
 static int vtconsole_init_device(struct con_driver *con)
 {
-	int i;
-	int error = 0;
-
 	con->flag |= CON_DRIVER_FLAG_ATTR;
-	dev_set_drvdata(con->dev, con);
-	for (i = 0; i < ARRAY_SIZE(device_attrs); i++) {
-		error = device_create_file(con->dev, &device_attrs[i]);
-		if (error)
-			break;
-	}
-
-	if (error) {
-		while (--i >= 0)
-			device_remove_file(con->dev, &device_attrs[i]);
-		con->flag &= ~CON_DRIVER_FLAG_ATTR;
-	}
-
-	return error;
+	return 0;
 }
 
 static void vtconsole_deinit_device(struct con_driver *con)
 {
-	int i;
-
-	if (con->flag & CON_DRIVER_FLAG_ATTR) {
-		for (i = 0; i < ARRAY_SIZE(device_attrs); i++)
-			device_remove_file(con->dev, &device_attrs[i]);
-		con->flag &= ~CON_DRIVER_FLAG_ATTR;
-	}
+	con->flag &= ~CON_DRIVER_FLAG_ATTR;
 }
 
 /**
@@ -3603,16 +3616,18 @@ static int do_register_con_driver(const struct consw *csw, int first, int last)
 		goto err;
 
 	desc = csw->con_startup();
-
-	if (!desc)
+	if (!desc) {
+		retval = -ENODEV;
 		goto err;
+	}
 
 	retval = -EINVAL;
 
 	for (i = 0; i < MAX_NR_CON_DRIVER; i++) {
 		con_driver = &registered_con_driver[i];
 
-		if (con_driver->con == NULL) {
+		if (con_driver->con == NULL &&
+		    !(con_driver->flag & CON_DRIVER_FLAG_ZOMBIE)) {
 			con_driver->con = csw;
 			con_driver->desc = desc;
 			con_driver->node = i;
@@ -3628,11 +3643,11 @@ static int do_register_con_driver(const struct consw *csw, int first, int last)
 	if (retval)
 		goto err;
 
-	con_driver->dev = device_create(vtconsole_class, NULL,
-						MKDEV(0, con_driver->node),
-						NULL, "vtcon%i",
-						con_driver->node);
-
+	con_driver->dev =
+		device_create_with_groups(vtconsole_class, NULL,
+					  MKDEV(0, con_driver->node),
+					  con_driver, con_dev_groups,
+					  "vtcon%i", con_driver->node);
 	if (IS_ERR(con_driver->dev)) {
 		printk(KERN_WARNING "Unable to create device for %s; "
 		       "errno = %ld\n", con_driver->desc,
@@ -3673,18 +3688,21 @@ int do_unregister_con_driver(const struct consw *csw)
 	for (i = 0; i < MAX_NR_CON_DRIVER; i++) {
 		struct con_driver *con_driver = &registered_con_driver[i];
 
-		if (con_driver->con == csw &&
-		    con_driver->flag & CON_DRIVER_FLAG_INIT) {
-			vtconsole_deinit_device(con_driver);
-			device_destroy(vtconsole_class,
-				       MKDEV(0, con_driver->node));
+		if (con_driver->con == csw) {
+			/*
+			 * Defer the removal of the sysfs entries since that
+			 * will acquire the kernfs s_active lock and we can't
+			 * acquire this lock while holding the console lock:
+			 * the unbind sysfs entry imposes already the opposite
+			 * order. Reset con already here to prevent any later
+			 * lookup to succeed and mark this slot as zombie, so
+			 * it won't get reused until we complete the removal
+			 * in the deferred work.
+			 */
 			con_driver->con = NULL;
-			con_driver->desc = NULL;
-			con_driver->dev = NULL;
-			con_driver->node = 0;
-			con_driver->flag = 0;
-			con_driver->first = 0;
-			con_driver->last = 0;
+			con_driver->flag = CON_DRIVER_FLAG_ZOMBIE;
+			schedule_work(&con_driver_unregister_work);
+
 			return 0;
 		}
 	}
@@ -3692,6 +3710,39 @@ int do_unregister_con_driver(const struct consw *csw)
 	return -ENODEV;
 }
 EXPORT_SYMBOL_GPL(do_unregister_con_driver);
+
+static void con_driver_unregister_callback(struct work_struct *ignored)
+{
+	int i;
+
+	console_lock();
+
+	for (i = 0; i < MAX_NR_CON_DRIVER; i++) {
+		struct con_driver *con_driver = &registered_con_driver[i];
+
+		if (!(con_driver->flag & CON_DRIVER_FLAG_ZOMBIE))
+			continue;
+
+		console_unlock();
+
+		vtconsole_deinit_device(con_driver);
+		device_destroy(vtconsole_class, MKDEV(0, con_driver->node));
+
+		console_lock();
+
+		if (WARN_ON_ONCE(con_driver->con))
+			con_driver->con = NULL;
+		con_driver->desc = NULL;
+		con_driver->dev = NULL;
+		con_driver->node = 0;
+		WARN_ON_ONCE(con_driver->flag != CON_DRIVER_FLAG_ZOMBIE);
+		con_driver->flag = 0;
+		con_driver->first = 0;
+		con_driver->last = 0;
+	}
+
+	console_unlock();
+}
 
 /*
  *	If we support more console drivers, this function is used
@@ -3747,10 +3798,11 @@ static int __init vtconsole_class_init(void)
 		struct con_driver *con = &registered_con_driver[i];
 
 		if (con->con && !con->dev) {
-			con->dev = device_create(vtconsole_class, NULL,
-							 MKDEV(0, con->node),
-							 NULL, "vtcon%i",
-							 con->node);
+			con->dev =
+				device_create_with_groups(vtconsole_class, NULL,
+							  MKDEV(0, con->node),
+							  con, con_dev_groups,
+							  "vtcon%i", con->node);
 
 			if (IS_ERR(con->dev)) {
 				printk(KERN_WARNING "Unable to create "

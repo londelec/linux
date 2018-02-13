@@ -29,6 +29,7 @@ static struct sk_buff *udp6_ufo_fragment(struct sk_buff *skb,
 	u8 frag_hdr_sz = sizeof(struct frag_hdr);
 	__wsum csum;
 	int tnl_hlen;
+	int err;
 
 	mss = skb_shinfo(skb)->gso_size;
 	if (unlikely(skb->len <= mss))
@@ -54,7 +55,7 @@ static struct sk_buff *udp6_ufo_fragment(struct sk_buff *skb,
 
 		/* Set the IPv6 fragment id if not set yet */
 		if (!skb_shinfo(skb)->ip6_frag_id)
-			ipv6_proxy_select_ident(skb);
+			ipv6_proxy_select_ident(dev_net(skb->dev), skb);
 
 		segs = NULL;
 		goto out;
@@ -85,7 +86,7 @@ static struct sk_buff *udp6_ufo_fragment(struct sk_buff *skb,
 		if (uh->check == 0)
 			uh->check = CSUM_MANGLED_0;
 
-		skb->ip_summed = CHECKSUM_NONE;
+		skb->ip_summed = CHECKSUM_UNNECESSARY;
 
 		/* Check if there is enough headroom to insert fragment header. */
 		tnl_hlen = skb_tnl_header_len(skb);
@@ -97,7 +98,10 @@ static struct sk_buff *udp6_ufo_fragment(struct sk_buff *skb,
 		/* Find the unfragmentable header and shift it left by frag_hdr_sz
 		 * bytes to insert fragment header.
 		 */
-		unfrag_ip6hlen = ip6_find_1stfragopt(skb, &prevhdr);
+		err = ip6_find_1stfragopt(skb, &prevhdr);
+		if (err < 0)
+			return ERR_PTR(err);
+		unfrag_ip6hlen = err;
 		nexthdr = *prevhdr;
 		*prevhdr = NEXTHDR_FRAGMENT;
 		unfrag_len = (skb_network_header(skb) - skb_mac_header(skb)) +
@@ -112,11 +116,9 @@ static struct sk_buff *udp6_ufo_fragment(struct sk_buff *skb,
 		fptr = (struct frag_hdr *)(skb_network_header(skb) + unfrag_ip6hlen);
 		fptr->nexthdr = nexthdr;
 		fptr->reserved = 0;
-		if (skb_shinfo(skb)->ip6_frag_id)
-			fptr->identification = skb_shinfo(skb)->ip6_frag_id;
-		else
-			ipv6_select_ident(fptr,
-					  (struct rt6_info *)skb_dst(skb));
+		if (!skb_shinfo(skb)->ip6_frag_id)
+			ipv6_proxy_select_ident(dev_net(skb->dev), skb);
+		fptr->identification = skb_shinfo(skb)->ip6_frag_id;
 
 		/* Fragment the skb. ipv6 header and the remaining fields of the
 		 * fragment header are updated in ipv6_gso_segment()
@@ -161,9 +163,13 @@ static int udp6_gro_complete(struct sk_buff *skb, int nhoff)
 	const struct ipv6hdr *ipv6h = ipv6_hdr(skb);
 	struct udphdr *uh = (struct udphdr *)(skb->data + nhoff);
 
-	if (uh->check)
+	if (uh->check) {
+		skb_shinfo(skb)->gso_type |= SKB_GSO_UDP_TUNNEL_CSUM;
 		uh->check = ~udp_v6_check(skb->len - nhoff, &ipv6h->saddr,
 					  &ipv6h->daddr, 0);
+	} else {
+		skb_shinfo(skb)->gso_type |= SKB_GSO_UDP_TUNNEL;
+	}
 
 	return udp_gro_complete(skb, nhoff);
 }
