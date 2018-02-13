@@ -45,7 +45,7 @@
  * NUMA support in SLOB is fairly simplistic, pushing most of the real
  * logic down to the page allocator, and simply doing the node accounting
  * on the upper levels. In the event that a node id is explicitly
- * provided, alloc_pages_exact_node() with the specified node id is used
+ * provided, __alloc_pages_node() with the specified node id is used
  * instead. The common case (or when the node id isn't explicitly provided)
  * will default to the current node, as per numa_node_id().
  *
@@ -60,6 +60,7 @@
 #include <linux/slab.h>
 
 #include <linux/mm.h>
+#include <linux/swap.h> /* struct reclaim_state */
 #include <linux/cache.h>
 #include <linux/init.h>
 #include <linux/export.h>
@@ -192,7 +193,7 @@ static void *slob_new_pages(gfp_t gfp, int order, int node)
 
 #ifdef CONFIG_NUMA
 	if (node != NUMA_NO_NODE)
-		page = alloc_pages_exact_node(node, gfp, order);
+		page = __alloc_pages_node(node, gfp, order);
 	else
 #endif
 		page = alloc_pages(gfp, order);
@@ -205,6 +206,8 @@ static void *slob_new_pages(gfp_t gfp, int order, int node)
 
 static void slob_free_pages(void *b, int order)
 {
+	if (current->reclaim_state)
+		current->reclaim_state->reclaimed_slab += 1 << order;
 	free_pages((unsigned long)b, order);
 }
 
@@ -529,7 +532,7 @@ int __kmem_cache_create(struct kmem_cache *c, unsigned long flags)
 	return 0;
 }
 
-void *slob_alloc_node(struct kmem_cache *c, gfp_t flags, int node)
+static void *slob_alloc_node(struct kmem_cache *c, gfp_t flags, int node)
 {
 	void *b;
 
@@ -555,7 +558,6 @@ void *slob_alloc_node(struct kmem_cache *c, gfp_t flags, int node)
 	kmemleak_alloc_recursive(b, c->size, 1, c->flags, flags);
 	return b;
 }
-EXPORT_SYMBOL(slob_alloc_node);
 
 void *kmem_cache_alloc(struct kmem_cache *cachep, gfp_t flags)
 {
@@ -609,13 +611,26 @@ void kmem_cache_free(struct kmem_cache *c, void *b)
 }
 EXPORT_SYMBOL(kmem_cache_free);
 
+void kmem_cache_free_bulk(struct kmem_cache *s, size_t size, void **p)
+{
+	__kmem_cache_free_bulk(s, size, p);
+}
+EXPORT_SYMBOL(kmem_cache_free_bulk);
+
+int kmem_cache_alloc_bulk(struct kmem_cache *s, gfp_t flags, size_t size,
+								void **p)
+{
+	return __kmem_cache_alloc_bulk(s, flags, size, p);
+}
+EXPORT_SYMBOL(kmem_cache_alloc_bulk);
+
 int __kmem_cache_shutdown(struct kmem_cache *c)
 {
 	/* No way to check for remaining objects */
 	return 0;
 }
 
-int __kmem_cache_shrink(struct kmem_cache *d)
+int __kmem_cache_shrink(struct kmem_cache *d, bool deactivate)
 {
 	return 0;
 }

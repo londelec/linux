@@ -185,9 +185,8 @@ static int pppol2tp_recv_payload_hook(struct sk_buff *skb)
 
 /* Receive message. This is the recvmsg for the PPPoL2TP socket.
  */
-static int pppol2tp_recvmsg(struct kiocb *iocb, struct socket *sock,
-			    struct msghdr *msg, size_t len,
-			    int flags)
+static int pppol2tp_recvmsg(struct socket *sock, struct msghdr *msg,
+			    size_t len, int flags)
 {
 	int err;
 	struct sk_buff *skb;
@@ -295,7 +294,7 @@ static void pppol2tp_session_sock_put(struct l2tp_session *session)
  * when a user application does a sendmsg() on the session socket. L2TP and
  * PPP headers must be inserted into the user's data.
  */
-static int pppol2tp_sendmsg(struct kiocb *iocb, struct socket *sock, struct msghdr *m,
+static int pppol2tp_sendmsg(struct socket *sock, struct msghdr *m,
 			    size_t total_len)
 {
 	static const unsigned char ppph[2] = { 0xff, 0x03 };
@@ -468,6 +467,10 @@ static void pppol2tp_session_close(struct l2tp_session *session)
 static void pppol2tp_session_destruct(struct sock *sk)
 {
 	struct l2tp_session *session = sk->sk_user_data;
+
+	skb_queue_purge(&sk->sk_receive_queue);
+	skb_queue_purge(&sk->sk_write_queue);
+
 	if (session) {
 		sk->sk_user_data = NULL;
 		BUG_ON(session->magic != L2TP_SESSION_MAGIC);
@@ -506,9 +509,6 @@ static int pppol2tp_release(struct socket *sock)
 		l2tp_session_queue_purge(session);
 		sock_put(sk);
 	}
-	skb_queue_purge(&sk->sk_receive_queue);
-	skb_queue_purge(&sk->sk_write_queue);
-
 	release_sock(sk);
 
 	/* This will delete the session context via
@@ -543,12 +543,12 @@ static int pppol2tp_backlog_recv(struct sock *sk, struct sk_buff *skb)
 
 /* socket() handler. Initialize a new struct sock.
  */
-static int pppol2tp_create(struct net *net, struct socket *sock)
+static int pppol2tp_create(struct net *net, struct socket *sock, int kern)
 {
 	int error = -ENOMEM;
 	struct sock *sk;
 
-	sk = sk_alloc(net, PF_PPPOX, GFP_KERNEL, &pppol2tp_sk_proto);
+	sk = sk_alloc(net, PF_PPPOX, GFP_KERNEL, &pppol2tp_sk_proto, kern);
 	if (!sk)
 		goto out;
 
@@ -1575,7 +1575,7 @@ static void pppol2tp_next_tunnel(struct net *net, struct pppol2tp_seq_data *pd)
 
 static void pppol2tp_next_session(struct net *net, struct pppol2tp_seq_data *pd)
 {
-	pd->session = l2tp_session_find_nth(pd->tunnel, pd->session_idx);
+	pd->session = l2tp_session_get_nth(pd->tunnel, pd->session_idx, true);
 	pd->session_idx++;
 
 	if (pd->session == NULL) {
@@ -1702,10 +1702,14 @@ static int pppol2tp_seq_show(struct seq_file *m, void *v)
 
 	/* Show the tunnel or session context.
 	 */
-	if (pd->session == NULL)
+	if (!pd->session) {
 		pppol2tp_seq_tunnel_show(m, pd->tunnel);
-	else
+	} else {
 		pppol2tp_seq_session_show(m, pd->session);
+		if (pd->session->deref)
+			pd->session->deref(pd->session);
+		l2tp_session_dec_refcount(pd->session);
+	}
 
 out:
 	return 0;
@@ -1864,3 +1868,4 @@ MODULE_DESCRIPTION("PPP over L2TP over UDP");
 MODULE_LICENSE("GPL");
 MODULE_VERSION(PPPOL2TP_DRV_VERSION);
 MODULE_ALIAS("pppox-proto-" __stringify(PX_PROTO_OL2TP));
+MODULE_ALIAS_L2TP_PWTYPE(7);

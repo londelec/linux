@@ -84,7 +84,7 @@ static volatile u32 twobyte_is_boostable[256 / 32] = {
 	/*      0  1  2  3  4  5  6  7  8  9  a  b  c  d  e  f          */
 	/*      ----------------------------------------------          */
 	W(0x00, 0, 0, 1, 1, 0, 0, 1, 0, 1, 1, 0, 0, 0, 0, 0, 0) | /* 00 */
-	W(0x10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0) , /* 10 */
+	W(0x10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1) , /* 10 */
 	W(0x20, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0) | /* 20 */
 	W(0x30, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0) , /* 30 */
 	W(0x40, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1) | /* 40 */
@@ -163,12 +163,12 @@ NOKPROBE_SYMBOL(skip_prefixes);
  * Returns non-zero if opcode is boostable.
  * RIP relative instructions are adjusted at copying time in 64 bits mode
  */
-int can_boost(kprobe_opcode_t *opcodes)
+int can_boost(kprobe_opcode_t *opcodes, void *addr)
 {
 	kprobe_opcode_t opcode;
 	kprobe_opcode_t *orig_opcodes = opcodes;
 
-	if (search_exception_tables((unsigned long)opcodes))
+	if (search_exception_tables((unsigned long)addr))
 		return 0;	/* Page fault may occur on this address. */
 
 retry:
@@ -223,27 +223,48 @@ static unsigned long
 __recover_probed_insn(kprobe_opcode_t *buf, unsigned long addr)
 {
 	struct kprobe *kp;
+	unsigned long faddr;
 
 	kp = get_kprobe((void *)addr);
-	/* There is no probe, return original address */
-	if (!kp)
+	faddr = ftrace_location(addr);
+	/*
+	 * Addresses inside the ftrace location are refused by
+	 * arch_check_ftrace_location(). Something went terribly wrong
+	 * if such an address is checked here.
+	 */
+	if (WARN_ON(faddr && faddr != addr))
+		return 0UL;
+	/*
+	 * Use the current code if it is not modified by Kprobe
+	 * and it cannot be modified by ftrace.
+	 */
+	if (!kp && !faddr)
 		return addr;
 
 	/*
-	 *  Basically, kp->ainsn.insn has an original instruction.
-	 *  However, RIP-relative instruction can not do single-stepping
-	 *  at different place, __copy_instruction() tweaks the displacement of
-	 *  that instruction. In that case, we can't recover the instruction
-	 *  from the kp->ainsn.insn.
+	 * Basically, kp->ainsn.insn has an original instruction.
+	 * However, RIP-relative instruction can not do single-stepping
+	 * at different place, __copy_instruction() tweaks the displacement of
+	 * that instruction. In that case, we can't recover the instruction
+	 * from the kp->ainsn.insn.
 	 *
-	 *  On the other hand, kp->opcode has a copy of the first byte of
-	 *  the probed instruction, which is overwritten by int3. And
-	 *  the instruction at kp->addr is not modified by kprobes except
-	 *  for the first byte, we can recover the original instruction
-	 *  from it and kp->opcode.
+	 * On the other hand, in case on normal Kprobe, kp->opcode has a copy
+	 * of the first byte of the probed instruction, which is overwritten
+	 * by int3. And the instruction at kp->addr is not modified by kprobes
+	 * except for the first byte, we can recover the original instruction
+	 * from it and kp->opcode.
+	 *
+	 * In case of Kprobes using ftrace, we do not have a copy of
+	 * the original instruction. In fact, the ftrace location might
+	 * be modified at anytime and even could be in an inconsistent state.
+	 * Fortunately, we know that the original code is the ideal 5-byte
+	 * long NOP.
 	 */
-	memcpy(buf, kp->addr, MAX_INSN_SIZE * sizeof(kprobe_opcode_t));
-	buf[0] = kp->opcode;
+	memcpy(buf, (void *)addr, MAX_INSN_SIZE * sizeof(kprobe_opcode_t));
+	if (faddr)
+		memcpy(buf, ideal_nops[NOP_ATOMIC5], 5);
+	else
+		buf[0] = kp->opcode;
 	return (unsigned long)buf;
 }
 
@@ -251,6 +272,7 @@ __recover_probed_insn(kprobe_opcode_t *buf, unsigned long addr)
  * Recover the probed instruction at addr for further analysis.
  * Caller must lock kprobes by kprobe_mutex, or disable preemption
  * for preventing to release referencing kprobes.
+ * Returns zero if the instruction can not get recovered.
  */
 unsigned long recover_probed_instruction(kprobe_opcode_t *buf, unsigned long addr)
 {
@@ -285,6 +307,8 @@ static int can_probe(unsigned long paddr)
 		 * normally used, we just go through if there is no kprobe.
 		 */
 		__addr = recover_probed_instruction(buf, addr);
+		if (!__addr)
+			return 0;
 		kernel_insn_init(&insn, (void *)__addr, MAX_INSN_SIZE);
 		insn_get_length(&insn);
 
@@ -330,21 +354,26 @@ int __copy_instruction(u8 *dest, u8 *src)
 {
 	struct insn insn;
 	kprobe_opcode_t buf[MAX_INSN_SIZE];
+	int length;
 	unsigned long recovered_insn =
 		recover_probed_instruction(buf, (unsigned long)src);
 
+	if (!recovered_insn)
+		return 0;
 	kernel_insn_init(&insn, (void *)recovered_insn, MAX_INSN_SIZE);
 	insn_get_length(&insn);
+	length = insn.length;
+
 	/* Another subsystem puts a breakpoint, failed to recover */
 	if (insn.opcode.bytes[0] == BREAKPOINT_INSTRUCTION)
 		return 0;
-	memcpy(dest, insn.kaddr, insn.length);
+	memcpy(dest, insn.kaddr, length);
 
 #ifdef CONFIG_X86_64
 	if (insn_rip_relative(&insn)) {
 		s64 newdisp;
 		u8 *disp;
-		kernel_insn_init(&insn, dest, insn.length);
+		kernel_insn_init(&insn, dest, length);
 		insn_get_displacement(&insn);
 		/*
 		 * The copied instruction uses the %rip-relative addressing
@@ -368,7 +397,7 @@ int __copy_instruction(u8 *dest, u8 *src)
 		*(s32 *) disp = (s32) newdisp;
 	}
 #endif
-	return insn.length;
+	return length;
 }
 
 static int arch_copy_kprobe(struct kprobe *p)
@@ -384,7 +413,7 @@ static int arch_copy_kprobe(struct kprobe *p)
 	 * __copy_instruction can modify the displacement of the instruction,
 	 * but it doesn't affect boostable check.
 	 */
-	if (can_boost(p->ainsn.insn))
+	if (can_boost(p->ainsn.insn, p->addr))
 		p->ainsn.boostable = 0;
 	else
 		p->ainsn.boostable = -1;
@@ -576,7 +605,7 @@ int kprobe_int3_handler(struct pt_regs *regs)
 	struct kprobe *p;
 	struct kprobe_ctlblk *kcb;
 
-	if (user_mode_vm(regs))
+	if (user_mode(regs))
 		return 0;
 
 	addr = (kprobe_opcode_t *)(regs->ip - sizeof(kprobe_opcode_t));
@@ -930,7 +959,19 @@ int kprobe_fault_handler(struct pt_regs *regs, int trapnr)
 		 * normal page fault.
 		 */
 		regs->ip = (unsigned long)cur->addr;
+		/*
+		 * Trap flag (TF) has been set here because this fault
+		 * happened where the single stepping will be done.
+		 * So clear it by resetting the current kprobe:
+		 */
+		regs->flags &= ~X86_EFLAGS_TF;
+
+		/*
+		 * If the TF flag was set before the kprobe hit,
+		 * don't touch it:
+		 */
 		regs->flags |= kcb->kprobe_old_flags;
+
 		if (kcb->kprobe_status == KPROBE_REENTER)
 			restore_previous_kprobe(kcb);
 		else
@@ -981,7 +1022,7 @@ int kprobe_exceptions_notify(struct notifier_block *self, unsigned long val,
 	struct die_args *args = data;
 	int ret = NOTIFY_DONE;
 
-	if (args->regs && user_mode_vm(args->regs))
+	if (args->regs && user_mode(args->regs))
 		return ret;
 
 	if (val == DIE_GPF) {

@@ -9,7 +9,6 @@ obj-$(CONFIG_ATARI_DSP56K)	+= dsp56k.o
 obj-$(CONFIG_VIRTIO_CONSOLE)	+= virtio_console.o
 obj-$(CONFIG_RAW_DRIVER)	+= raw.o
 obj-$(CONFIG_SGI_SNSC)		+= snsc.o snsc_event.o
-obj-$(CONFIG_MSM_SMD_PKT)	+= msm_smd_pkt.o
 obj-$(CONFIG_MSPEC)		+= mspec.o
 obj-$(CONFIG_MMTIMER)		+= mmtimer.o
 obj-$(CONFIG_UV_MMTIMER)	+= uv_mmtimer.o
@@ -36,7 +35,6 @@ else
   obj-$(CONFIG_NVRAM)	+= nvram.o
 endif
 obj-$(CONFIG_TOSHIBA)		+= toshiba.o
-obj-$(CONFIG_I8K)		+= i8k.o
 obj-$(CONFIG_DS1620)		+= ds1620.o
 obj-$(CONFIG_HW_RANDOM)		+= hw_random/
 obj-$(CONFIG_PPDEV)		+= ppdev.o
@@ -47,17 +45,6 @@ obj-$(CONFIG_PC8736x_GPIO)	+= pc8736x_gpio.o
 obj-$(CONFIG_NSC_GPIO)		+= nsc_gpio.o
 obj-$(CONFIG_GPIO_TB0219)	+= tb0219.o
 obj-$(CONFIG_TELCLOCK)		+= tlclk.o
-obj-$(CONFIG_BOOTCOUNT)		+= bootcount.o
-obj-$(CONFIG_MUCMC52_IO)	+= mucmc52_io.o
-obj-$(CONFIG_DISPLAY_PDSP1880)	+= display_pdsp1880.o
-obj-$(CONFIG_SRAM)		+= sram.o
-obj-$(CONFIG_UC101_IO)		+= uc101_io.o
-
-obj-$(CONFIG_PPC405EZ_ADC)	+= ppc405ez_adc.o
-obj-$(CONFIG_PPC405EZ_DAC)	+= ppc405ez_dac.o
-
-obj-$(CONFIG_LWMON5_KBD)	+= lwmon5_kbd.o
-obj-$(CONFIG_IAI_CPLD)		+= cpld.o
 
 obj-$(CONFIG_MWAVE)		+= mwave/
 obj-y				+= agp/

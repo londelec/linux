@@ -27,8 +27,6 @@
 
 #include "fs_enet.h"
 
-MODULE_LICENSE("GPL");
-
 struct bb_info {
 	struct mdiobb_ctrl ctrl;
 	__be32 __iomem *dir;
@@ -215,7 +213,7 @@ static int fs_enet_mdio_remove(struct platform_device *ofdev)
 	return 0;
 }
 
-static struct of_device_id fs_enet_mdio_bb_match[] = {
+static const struct of_device_id fs_enet_mdio_bb_match[] = {
 	{
 		.compatible = "fsl,cpm2-mdio-bitbang",
 	},

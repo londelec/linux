@@ -6,15 +6,6 @@
 #include <asm/irq.h>
 #include <asm/io.h>
 
-#ifdef CONFIG_ARCH_HAS_NMI_WATCHDOG
-
-/**
- * do_nmi_callback
- *
- * Check to see if a callback exists and execute it.  Return 1
- * if the handler exists and was handled successfully.
- */
-int do_nmi_callback(struct pt_regs *regs, int cpu);
 #ifdef CONFIG_X86_LOCAL_APIC
 
 extern int avail_to_resrv_perfctr_nmi_bit(unsigned int);

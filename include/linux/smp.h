@@ -18,7 +18,7 @@ struct call_single_data {
 	struct llist_node llist;
 	smp_call_func_t func;
 	void *info;
-	u16 flags;
+	unsigned int flags;
 };
 
 /* total number of cpus in this system (may exceed NR_CPUS) */
@@ -49,6 +49,93 @@ void on_each_cpu_cond(bool (*cond_func)(int cpu, void *info),
 		gfp_t gfp_flags);
 
 int smp_call_function_single_async(int cpu, struct call_single_data *csd);
+
+#ifdef CONFIG_X86
+/* indicate usage of IBRS to control execution speculation */
+extern int use_ibrs;
+extern u32 sysctl_ibrs_enabled;
+extern struct mutex spec_ctrl_mutex;
+#define ibrs_supported		(use_ibrs & 0x2)
+#define ibrs_disabled		(use_ibrs & 0x4)
+static inline void set_ibrs_inuse(void)
+{
+	if (ibrs_supported)
+		use_ibrs |= 0x1;
+}
+static inline void clear_ibrs_inuse(void)
+{
+	use_ibrs &= ~0x1;
+}
+static inline int check_ibrs_inuse(void)
+{
+	if (use_ibrs & 0x1)
+		return 1;
+	else
+		/* rmb to prevent wrong speculation for security */
+		rmb();
+	return 0;
+}
+static inline void set_ibrs_supported(void)
+{
+	use_ibrs |= 0x2;
+	if (!ibrs_disabled)
+		set_ibrs_inuse();
+}
+static inline void set_ibrs_disabled(void)
+{
+	use_ibrs |= 0x4;
+	if (check_ibrs_inuse())
+		clear_ibrs_inuse();
+}
+static inline void clear_ibrs_disabled(void)
+{
+	use_ibrs &= ~0x4;
+	set_ibrs_inuse();
+}
+#define ibrs_inuse 		(check_ibrs_inuse())
+
+/* indicate usage of IBPB to control execution speculation */
+extern int use_ibpb;
+extern u32 sysctl_ibpb_enabled;
+#define ibpb_supported		(use_ibpb & 0x2)
+#define ibpb_disabled		(use_ibpb & 0x4)
+static inline void set_ibpb_inuse(void)
+{
+	if (ibpb_supported)
+		use_ibpb |= 0x1;
+}
+static inline void clear_ibpb_inuse(void)
+{
+	use_ibpb &= ~0x1;
+}
+static inline int check_ibpb_inuse(void)
+{
+	if (use_ibpb & 0x1)
+		return 1;
+	else
+		/* rmb to prevent wrong speculation for security */
+		rmb();
+	return 0;
+}
+static inline void set_ibpb_supported(void)
+{
+	use_ibpb |= 0x2;
+	if (!ibpb_disabled)
+		set_ibpb_inuse();
+}
+static inline void set_ibpb_disabled(void)
+{
+	use_ibpb |= 0x4;
+	if (check_ibpb_inuse())
+		clear_ibpb_inuse();
+}
+static inline void clear_ibpb_disabled(void)
+{
+	use_ibpb &= ~0x4;
+	set_ibpb_inuse();
+}
+#define ibpb_inuse		(check_ibpb_inuse())
+#endif
 
 #ifdef CONFIG_SMP
 
@@ -150,6 +237,13 @@ smp_call_function_any(const struct cpumask *mask, smp_call_func_t func,
 
 static inline void kick_all_cpus_sync(void) {  }
 static inline void wake_up_all_idle_cpus(void) {  }
+
+#ifdef CONFIG_UP_LATE_INIT
+extern void __init up_late_init(void);
+static inline void smp_init(void) { up_late_init(); }
+#else
+static inline void smp_init(void) { }
+#endif
 
 #endif /* !SMP */
 

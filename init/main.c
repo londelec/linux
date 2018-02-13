@@ -61,7 +61,6 @@
 #include <linux/kthread.h>
 #include <linux/sched.h>
 #include <linux/signal.h>
-#include <linux/logbuff.h>
 #include <linux/idr.h>
 #include <linux/kgdb.h>
 #include <linux/ftrace.h>
@@ -81,6 +80,8 @@
 #include <linux/list.h>
 #include <linux/integrity.h>
 #include <linux/proc_ns.h>
+#include <linux/io.h>
+#include <linux/kaiser.h>
 
 #include <asm/io.h>
 #include <asm/bugs.h>
@@ -88,14 +89,10 @@
 #include <asm/sections.h>
 #include <asm/cacheflush.h>
 
-#ifdef CONFIG_X86_LOCAL_APIC
-#include <asm/smp.h>
-#endif
-
 static int kernel_init(void *);
 
 extern void init_IRQ(void);
-extern void fork_init(unsigned long);
+extern void fork_init(void);
 extern void radix_tree_init(void);
 #ifndef CONFIG_DEBUG_RODATA
 static inline void mark_rodata_ro(void) { }
@@ -148,7 +145,7 @@ EXPORT_SYMBOL_GPL(static_key_initialized);
  * rely on the BIOS and skip the reset operation.
  *
  * This is useful if kernel is booting in an unreliable environment.
- * For ex. kdump situaiton where previous kernel has crashed, BIOS has been
+ * For ex. kdump situation where previous kernel has crashed, BIOS has been
  * skipped and devices will be in unknown state.
  */
 unsigned int reset_devices;
@@ -239,7 +236,8 @@ static int __init loglevel(char *str)
 early_param("loglevel", loglevel);
 
 /* Change NUL term back to "=", to make "param" the whole string. */
-static int __init repair_env_string(char *param, char *val, const char *unused)
+static int __init repair_env_string(char *param, char *val,
+				    const char *unused, void *arg)
 {
 	if (val) {
 		/* param=val or param="val"? */
@@ -256,14 +254,15 @@ static int __init repair_env_string(char *param, char *val, const char *unused)
 }
 
 /* Anything after -- gets handed straight to init. */
-static int __init set_init_arg(char *param, char *val, const char *unused)
+static int __init set_init_arg(char *param, char *val,
+			       const char *unused, void *arg)
 {
 	unsigned int i;
 
 	if (panic_later)
 		return 0;
 
-	repair_env_string(param, val, unused);
+	repair_env_string(param, val, unused, NULL);
 
 	for (i = 0; argv_init[i]; i++) {
 		if (i == MAX_INIT_ARGS) {
@@ -280,9 +279,10 @@ static int __init set_init_arg(char *param, char *val, const char *unused)
  * Unknown boot options get handed to init, unless they look like
  * unused parameters (modprobe will find them in /proc/cmdline).
  */
-static int __init unknown_bootoption(char *param, char *val, const char *unused)
+static int __init unknown_bootoption(char *param, char *val,
+				     const char *unused, void *arg)
 {
-	repair_env_string(param, val, unused);
+	repair_env_string(param, val, unused, NULL);
 
 	/* Handle obsolete-style parameters */
 	if (obsolete_checksetup(param))
@@ -352,15 +352,6 @@ __setup("rdinit=", rdinit_setup);
 
 #ifndef CONFIG_SMP
 static const unsigned int setup_max_cpus = NR_CPUS;
-#ifdef CONFIG_X86_LOCAL_APIC
-static void __init smp_init(void)
-{
-	APIC_init_uniprocessor();
-}
-#else
-#define smp_init()	do { } while (0)
-#endif
-
 static inline void setup_nr_cpu_ids(void) { }
 static inline void smp_prepare_cpus(unsigned int maxcpus) { }
 #endif
@@ -398,6 +389,7 @@ static noinline void __init_refok rest_init(void)
 	int pid;
 
 	rcu_scheduler_starting();
+	smpboot_thread_init();
 	/*
 	 * We need to spawn init first so that it obtains pid 1, however
 	 * the init task will end up wanting to create kthreads, which, if
@@ -422,7 +414,8 @@ static noinline void __init_refok rest_init(void)
 }
 
 /* Check for early params. */
-static int __init do_early_param(char *param, char *val, const char *unused)
+static int __init do_early_param(char *param, char *val,
+				 const char *unused, void *arg)
 {
 	const struct obs_kernel_param *p;
 
@@ -441,7 +434,8 @@ static int __init do_early_param(char *param, char *val, const char *unused)
 
 void __init parse_early_options(char *cmdline)
 {
-	parse_args("early options", cmdline, NULL, 0, 0, 0, do_early_param);
+	parse_args("early options", cmdline, NULL, 0, 0, 0, NULL,
+		   do_early_param);
 }
 
 /* Arch code calls this early on, or if not, just before other parsing. */
@@ -498,6 +492,8 @@ static void __init mm_init(void)
 	percpu_init_late();
 	pgtable_init();
 	vmalloc_init();
+	ioremap_huge_init();
+	kaiser_init();
 }
 
 asmlinkage __visible void __init start_kernel(void)
@@ -528,9 +524,6 @@ asmlinkage __visible void __init start_kernel(void)
  * Interrupts are still disabled. Do necessary setups, then
  * enable them
  */
-#ifdef CONFIG_LOGBUFFER
-	setup_ext_logbuff();
-#endif
 	boot_cpu_init();
 	page_address_init();
 	pr_notice("%s", linux_banner);
@@ -549,10 +542,10 @@ asmlinkage __visible void __init start_kernel(void)
 	after_dashes = parse_args("Booting kernel",
 				  static_command_line, __start___param,
 				  __stop___param - __start___param,
-				  -1, -1, &unknown_bootoption);
+				  -1, -1, NULL, &unknown_bootoption);
 	if (!IS_ERR_OR_NULL(after_dashes))
 		parse_args("Setting init args", after_dashes, NULL, 0, -1, -1,
-			   set_init_arg);
+			   NULL, set_init_arg);
 
 	jump_label_init();
 
@@ -659,25 +652,26 @@ asmlinkage __visible void __init start_kernel(void)
 #endif
 	thread_info_cache_init();
 	cred_init();
-	fork_init(totalram_pages);
+	fork_init();
 	proc_caches_init();
 	buffer_init();
 	key_init();
 	security_init();
 	dbg_late_init();
-	vfs_caches_init(totalram_pages);
+	vfs_caches_init();
 	signals_init();
 	/* rootfs populating might need page-writeback */
 	page_writeback_init();
 	proc_root_init();
 	nsfs_init();
-	cgroup_init();
 	cpuset_init();
+	cgroup_init();
 	taskstats_init_early();
 	delayacct_init();
 
 	check_bugs();
 
+	acpi_subsystem_init();
 	sfi_init_late();
 
 	if (efi_enabled(EFI_RUNTIME_SERVICES)) {
@@ -861,7 +855,7 @@ static void __init do_initcall_level(int level)
 		   initcall_command_line, __start___param,
 		   __stop___param - __start___param,
 		   level, level,
-		   &repair_env_string);
+		   NULL, &repair_env_string);
 
 	for (fn = initcall_levels[level]; fn < initcall_levels[level+1]; fn++)
 		do_one_initcall(*fn);
@@ -885,7 +879,6 @@ static void __init do_initcalls(void)
 static void __init do_basic_setup(void)
 {
 	cpuset_init_smp();
-	usermodehelper_init();
 	shmem_init();
 	driver_init();
 	init_irq_proc();
@@ -970,13 +963,8 @@ static int __ref kernel_init(void *unused)
 		ret = run_init_process(execute_command);
 		if (!ret)
 			return 0;
-#ifndef CONFIG_INIT_FALLBACK
 		panic("Requested init %s failed (error %d).",
 		      execute_command, ret);
-#else
-		pr_err("Failed to execute %s (error %d).  Attempting defaults...\n",
-		       execute_command, ret);
-#endif
 	}
 	if (!try_to_run_init_process("/sbin/init") ||
 	    !try_to_run_init_process("/etc/init") ||
@@ -1016,6 +1004,8 @@ static noinline void __init kernel_init_freeable(void)
 
 	smp_init();
 	sched_init_smp();
+
+	page_alloc_init_late();
 
 	do_basic_setup();
 

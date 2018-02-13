@@ -31,6 +31,11 @@ int pci_enable_rom(struct pci_dev *pdev)
 	if (!res->flags)
 		return -1;
 
+	/*
+	 * Ideally pci_update_resource() would update the ROM BAR address,
+	 * and we would only set the enable bit here.  But apparently some
+	 * devices have buggy ROM BARs that read as zero when disabled.
+	 */
 	pcibios_resource_to_bus(pdev->bus, &region, res);
 	pci_read_config_dword(pdev, pdev->rom_base_reg, &rom_addr);
 	rom_addr &= ~PCI_ROM_ADDRESS_MASK;
@@ -71,6 +76,7 @@ size_t pci_get_rom_size(struct pci_dev *pdev, void __iomem *rom, size_t size)
 {
 	void __iomem *image;
 	int last_image;
+	unsigned length;
 
 	image = rom;
 	do {
@@ -93,9 +99,9 @@ size_t pci_get_rom_size(struct pci_dev *pdev, void __iomem *rom, size_t size)
 		if (readb(pds + 3) != 'R')
 			break;
 		last_image = readb(pds + 21) & 0x80;
-		/* this length is reliable */
-		image += readw(pds + 16) * 512;
-	} while (!last_image);
+		length = readw(pds + 16);
+		image += length * 512;
+	} while (length && !last_image);
 
 	/* never return a size larger than the PCI resource window */
 	/* there are known ROMs that get the size wrong */

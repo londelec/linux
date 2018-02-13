@@ -30,10 +30,9 @@
 #include <linux/kernel.h>
 #include <crypto/internal/hash.h>
 
-#include <asm/cpufeature.h>
+#include <asm/cpufeatures.h>
 #include <asm/cpu_device_id.h>
-#include <asm/i387.h>
-#include <asm/fpu-internal.h>
+#include <asm/fpu/internal.h>
 
 #define CHKSUM_BLOCK_SIZE	1
 #define CHKSUM_DIGEST_SIZE	4

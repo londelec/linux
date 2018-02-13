@@ -2,7 +2,7 @@
 
 #include <linux/pci.h>
 #include <linux/cache.h>
-#include <linux/module.h>
+#include <linux/init.h>
 #include <linux/swiotlb.h>
 #include <linux/bootmem.h>
 #include <linux/dma-mapping.h>
@@ -19,6 +19,13 @@ void *x86_swiotlb_alloc_coherent(struct device *hwdev, size_t size,
 					struct dma_attrs *attrs)
 {
 	void *vaddr;
+
+	/*
+	 * Don't print a warning when the first allocation attempt fails.
+	 * swiotlb_alloc_coherent() will print a warning when the DMA
+	 * memory allocation ultimately failed.
+	 */
+	flags |= __GFP_NOWARN;
 
 	vaddr = dma_generic_alloc_coherent(hwdev, size, dma_handle, flags,
 					   attrs);

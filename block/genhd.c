@@ -8,6 +8,7 @@
 #include <linux/kdev_t.h>
 #include <linux/kernel.h>
 #include <linux/blkdev.h>
+#include <linux/backing-dev.h>
 #include <linux/init.h>
 #include <linux/spinlock.h>
 #include <linux/proc_fs.h>
@@ -422,9 +423,9 @@ int blk_alloc_devt(struct hd_struct *part, dev_t *devt)
 	/* allocate ext devt */
 	idr_preload(GFP_KERNEL);
 
-	spin_lock(&ext_devt_lock);
+	spin_lock_bh(&ext_devt_lock);
 	idx = idr_alloc(&ext_devt_idr, part, 0, NR_EXT_DEVT, GFP_NOWAIT);
-	spin_unlock(&ext_devt_lock);
+	spin_unlock_bh(&ext_devt_lock);
 
 	idr_preload_end();
 	if (idx < 0)
@@ -449,9 +450,9 @@ void blk_free_devt(dev_t devt)
 		return;
 
 	if (MAJOR(devt) == BLOCK_EXT_MAJOR) {
-		spin_lock(&ext_devt_lock);
+		spin_lock_bh(&ext_devt_lock);
 		idr_remove(&ext_devt_idr, blk_mangle_minor(MINOR(devt)));
-		spin_unlock(&ext_devt_lock);
+		spin_unlock_bh(&ext_devt_lock);
 	}
 }
 
@@ -610,8 +611,8 @@ void add_disk(struct gendisk *disk)
 	disk_alloc_events(disk);
 
 	/* Register BDI before referencing it from bdev */
-	bdi = &disk->queue->backing_dev_info;
-	bdi_register_dev(bdi, disk_devt(disk));
+	bdi = disk->queue->backing_dev_info;
+	bdi_register_owner(bdi, disk_to_dev(disk));
 
 	blk_register_region(disk_devt(disk), disk->minors, NULL,
 			    exact_match, exact_lock, disk);
@@ -629,6 +630,7 @@ void add_disk(struct gendisk *disk)
 	WARN_ON(retval);
 
 	disk_add_events(disk);
+	blk_integrity_add(disk);
 }
 EXPORT_SYMBOL(add_disk);
 
@@ -637,6 +639,7 @@ void del_gendisk(struct gendisk *disk)
 	struct disk_part_iter piter;
 	struct hd_struct *part;
 
+	blk_integrity_del(disk);
 	disk_del_events(disk);
 
 	/* invalidate stuff */
@@ -644,17 +647,27 @@ void del_gendisk(struct gendisk *disk)
 			     DISK_PITER_INCL_EMPTY | DISK_PITER_REVERSE);
 	while ((part = disk_part_iter_next(&piter))) {
 		invalidate_partition(disk, part->partno);
+		bdev_unhash_inode(part_devt(part));
 		delete_partition(disk, part->partno);
 	}
 	disk_part_iter_exit(&piter);
 
 	invalidate_partition(disk, 0);
+	bdev_unhash_inode(disk_devt(disk));
 	set_capacity(disk, 0);
 	disk->flags &= ~GENHD_FL_UP;
 
 	sysfs_remove_link(&disk_to_dev(disk)->kobj, "bdi");
-	bdi_unregister(&disk->queue->backing_dev_info);
-	blk_unregister_queue(disk);
+	if (disk->queue) {
+		/*
+		 * Unregister bdi before releasing device numbers (as they can
+		 * get reused and we'd get clashes in sysfs).
+		 */
+		bdi_unregister(disk->queue->backing_dev_info);
+		blk_unregister_queue(disk);
+	} else {
+		WARN_ON(1);
+	}
 	blk_unregister_region(disk_devt(disk), disk->minors);
 
 	part_stat_set_all(&disk->part0, 0);
@@ -662,7 +675,6 @@ void del_gendisk(struct gendisk *disk)
 
 	kobject_put(disk->part0.holder_dir);
 	kobject_put(disk->slave_dir);
-	disk->driverfs_dev = NULL;
 	if (!sysfs_deprecated)
 		sysfs_remove_link(block_depr, dev_name(disk_to_dev(disk)));
 	pm_runtime_set_memalloc_noio(disk_to_dev(disk), false);
@@ -691,13 +703,13 @@ struct gendisk *get_gendisk(dev_t devt, int *partno)
 	} else {
 		struct hd_struct *part;
 
-		spin_lock(&ext_devt_lock);
+		spin_lock_bh(&ext_devt_lock);
 		part = idr_find(&ext_devt_idr, blk_mangle_minor(MINOR(devt)));
 		if (part && get_disk(part_to_disk(part))) {
 			*partno = part->partno;
 			disk = part_to_disk(part);
 		}
-		spin_unlock(&ext_devt_lock);
+		spin_unlock_bh(&ext_devt_lock);
 	}
 
 	return disk;
@@ -829,6 +841,7 @@ static void disk_seqf_stop(struct seq_file *seqf, void *v)
 	if (iter) {
 		class_dev_iter_exit(iter);
 		kfree(iter);
+		seqf->private = NULL;
 	}
 }
 
@@ -1110,8 +1123,7 @@ static void disk_release(struct device *dev)
 	disk_release_events(disk);
 	kfree(disk->random);
 	disk_replace_part_tbl(disk, NULL);
-	free_part_stats(&disk->part0);
-	free_part_info(&disk->part0);
+	hd_free_part(&disk->part0);
 	if (disk->queue)
 		blk_put_queue(disk->queue);
 	kfree(disk);
@@ -1285,7 +1297,11 @@ struct gendisk *alloc_disk_node(int minors, int node_id)
 		 * converted to make use of bd_mutex and sequence counters.
 		 */
 		seqcount_init(&disk->part0.nr_sects_seq);
-		hd_ref_init(&disk->part0);
+		if (hd_ref_init(&disk->part0)) {
+			hd_free_part(&disk->part0);
+			kfree(disk);
+			return NULL;
+		}
 
 		disk->minors = minors;
 		rand_initialize_disk(disk);
@@ -1307,7 +1323,7 @@ struct kobject *get_disk(struct gendisk *disk)
 	owner = disk->fops->owner;
 	if (owner && !try_module_get(owner))
 		return NULL;
-	kobj = kobject_get(&disk_to_dev(disk)->kobj);
+	kobj = kobject_get_unless_zero(&disk_to_dev(disk)->kobj);
 	if (kobj == NULL) {
 		module_put(owner);
 		return NULL;

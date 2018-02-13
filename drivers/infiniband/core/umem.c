@@ -99,6 +99,17 @@ struct ib_umem *ib_umem_get(struct ib_ucontext *context, unsigned long addr,
 	if (dmasync)
 		dma_set_attr(DMA_ATTR_WRITE_BARRIER, &attrs);
 
+	if (!size)
+		return ERR_PTR(-EINVAL);
+
+	/*
+	 * If the combination of the addr and size requested for this memory
+	 * region causes an integer overflow, return error.
+	 */
+	if (((addr + size) < addr) ||
+	    PAGE_ALIGN(addr + size) < (addr + size))
+		return ERR_PTR(-EINVAL);
+
 	if (!can_do_mlock())
 		return ERR_PTR(-EPERM);
 
@@ -123,6 +134,7 @@ struct ib_umem *ib_umem_get(struct ib_ucontext *context, unsigned long addr,
 		 IB_ACCESS_REMOTE_ATOMIC | IB_ACCESS_MW_BIND));
 
 	if (access & IB_ACCESS_ON_DEMAND) {
+		put_pid(umem->pid);
 		ret = ib_umem_odp_get(context, umem);
 		if (ret) {
 			kfree(umem);
@@ -138,6 +150,7 @@ struct ib_umem *ib_umem_get(struct ib_ucontext *context, unsigned long addr,
 
 	page_list = (struct page **) __get_free_page(GFP_KERNEL);
 	if (!page_list) {
+		put_pid(umem->pid);
 		kfree(umem);
 		return ERR_PTR(-ENOMEM);
 	}
@@ -164,7 +177,7 @@ struct ib_umem *ib_umem_get(struct ib_ucontext *context, unsigned long addr,
 
 	cur_base = addr & PAGE_MASK;
 
-	if (npages == 0) {
+	if (npages == 0 || npages > UINT_MAX) {
 		ret = -EINVAL;
 		goto out;
 	}

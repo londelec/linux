@@ -465,9 +465,11 @@ static int bfin_musb_exit(struct musb *musb)
 }
 
 static const struct musb_platform_ops bfin_ops = {
+	.quirks		= MUSB_DMA_INVENTRA,
 	.init		= bfin_musb_init,
 	.exit		= bfin_musb_exit,
 
+	.fifo_offset	= bfin_fifo_offset,
 	.readb		= bfin_readb,
 	.writeb		= bfin_writeb,
 	.readw		= bfin_readw,
@@ -477,6 +479,10 @@ static const struct musb_platform_ops bfin_ops = {
 	.fifo_mode	= 2,
 	.read_fifo	= bfin_read_fifo,
 	.write_fifo	= bfin_write_fifo,
+#ifdef CONFIG_USB_INVENTRA_DMA
+	.dma_init	= musbhs_dma_controller_create,
+	.dma_exit	= musbhs_dma_controller_destroy,
+#endif
 	.enable		= bfin_musb_enable,
 	.disable	= bfin_musb_disable,
 
@@ -608,7 +614,7 @@ static SIMPLE_DEV_PM_OPS(bfin_pm_ops, bfin_suspend, bfin_resume);
 
 static struct platform_driver bfin_driver = {
 	.probe		= bfin_probe,
-	.remove		= __exit_p(bfin_remove),
+	.remove		= bfin_remove,
 	.driver		= {
 		.name	= "musb-blackfin",
 		.pm	= &bfin_pm_ops,

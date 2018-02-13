@@ -556,6 +556,7 @@ void ftrace_replace_code(int enable)
 	run_sync();
 
 	report = "updating code";
+	count = 0;
 
 	for_ftrace_rec_iter(iter) {
 		rec = ftrace_rec_iter_record(iter);
@@ -563,11 +564,13 @@ void ftrace_replace_code(int enable)
 		ret = add_update(rec, enable);
 		if (ret)
 			goto remove_breakpoints;
+		count++;
 	}
 
 	run_sync();
 
 	report = "removing breakpoints";
+	count = 0;
 
 	for_ftrace_rec_iter(iter) {
 		rec = ftrace_rec_iter_record(iter);
@@ -575,6 +578,7 @@ void ftrace_replace_code(int enable)
 		ret = finish_update(rec, enable);
 		if (ret)
 			goto remove_breakpoints;
+		count++;
 	}
 
 	run_sync();
@@ -973,6 +977,18 @@ void prepare_ftrace_return(unsigned long self_addr, unsigned long *parent,
 	unsigned long return_hooker = (unsigned long)
 				&return_to_handler;
 
+	/*
+	 * When resuming from suspend-to-ram, this function can be indirectly
+	 * called from early CPU startup code while the CPU is in real mode,
+	 * which would fail miserably.  Make sure the stack pointer is a
+	 * virtual address.
+	 *
+	 * This check isn't as accurate as virt_addr_valid(), but it should be
+	 * good enough for this purpose, and it's fast.
+	 */
+	if (unlikely((long)__builtin_frame_address(0) >= 0))
+		return;
+
 	if (unlikely(ftrace_graph_is_dead()))
 		return;
 
@@ -998,7 +1014,7 @@ void prepare_ftrace_return(unsigned long self_addr, unsigned long *parent,
 		_ASM_EXTABLE(1b, 4b)
 		_ASM_EXTABLE(2b, 4b)
 
-		: [old] "=r" (old), [faulted] "=r" (faulted)
+		: [old] "=&r" (old), [faulted] "=r" (faulted)
 		: [parent] "r" (parent), [return_hooker] "r" (return_hooker)
 		: "memory"
 	);

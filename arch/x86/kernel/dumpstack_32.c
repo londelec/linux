@@ -7,7 +7,7 @@
 #include <linux/uaccess.h>
 #include <linux/hardirq.h>
 #include <linux/kdebug.h>
-#include <linux/module.h>
+#include <linux/export.h>
 #include <linux/ptrace.h>
 #include <linux/kexec.h>
 #include <linux/sysfs.h>
@@ -108,9 +108,12 @@ show_stack_log_lvl(struct task_struct *task, struct pt_regs *regs,
 	for (i = 0; i < kstack_depth_to_print; i++) {
 		if (kstack_end(stack))
 			break;
-		if (i && ((i % STACKSLOTS_PER_LINE) == 0))
-			pr_cont("\n");
-		pr_cont(" %08lx", *stack++);
+		if ((i % STACKSLOTS_PER_LINE) == 0) {
+			if (i != 0)
+				pr_cont("\n");
+			printk("%s %08lx", log_lvl, *stack++);
+		} else
+			pr_cont(" %08lx", *stack++);
 		touch_nmi_watchdog();
 	}
 	pr_cont("\n");
@@ -123,13 +126,13 @@ void show_regs(struct pt_regs *regs)
 	int i;
 
 	show_regs_print_info(KERN_EMERG);
-	__show_regs(regs, !user_mode_vm(regs));
+	__show_regs(regs, !user_mode(regs));
 
 	/*
 	 * When in-kernel, we also print out the stack and code at the
 	 * time of the fault..
 	 */
-	if (!user_mode_vm(regs)) {
+	if (!user_mode(regs)) {
 		unsigned int code_prologue = code_bytes * 43 / 64;
 		unsigned int code_len = code_bytes;
 		unsigned char c;

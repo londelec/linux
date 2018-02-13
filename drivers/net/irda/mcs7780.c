@@ -141,9 +141,19 @@ static int mcs_set_reg(struct mcs_cb *mcs, __u16 reg, __u16 val)
 static int mcs_get_reg(struct mcs_cb *mcs, __u16 reg, __u16 * val)
 {
 	struct usb_device *dev = mcs->usbdev;
-	int ret = usb_control_msg(dev, usb_rcvctrlpipe(dev, 0), MCS_RDREQ,
-				  MCS_RD_RTYPE, 0, reg, val, 2,
-				  msecs_to_jiffies(MCS_CTRL_TIMEOUT));
+	void *dmabuf;
+	int ret;
+
+	dmabuf = kmalloc(sizeof(__u16), GFP_KERNEL);
+	if (!dmabuf)
+		return -ENOMEM;
+
+	ret = usb_control_msg(dev, usb_rcvctrlpipe(dev, 0), MCS_RDREQ,
+			      MCS_RD_RTYPE, 0, reg, dmabuf, 2,
+			      msecs_to_jiffies(MCS_CTRL_TIMEOUT));
+
+	memcpy(val, dmabuf, sizeof(__u16));
+	kfree(dmabuf);
 
 	return ret;
 }
@@ -722,7 +732,6 @@ static int mcs_net_open(struct net_device *netdev)
 
 	skb_reserve(mcs->rx_buff.skb, 1);
 	mcs->rx_buff.head = mcs->rx_buff.skb->data;
-	do_gettimeofday(&mcs->rx_time);
 
 	/*
 	 * Now that everything should be initialized properly,
@@ -799,7 +808,6 @@ static void mcs_receive_irq(struct urb *urb)
 			mcs_unwrap_fir(mcs, urb->transfer_buffer,
 				urb->actual_length);
 		}
-		do_gettimeofday(&mcs->rx_time);
 	}
 
 	ret = usb_submit_urb(urb, GFP_ATOMIC);

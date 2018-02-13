@@ -1650,9 +1650,9 @@ static netdev_tx_t bdx_tx_transmit(struct sk_buff *skb,
 		    txd_mss);
 	}
 
-	if (vlan_tx_tag_present(skb)) {
+	if (skb_vlan_tag_present(skb)) {
 		/*Cut VLAN ID to 12 bits */
-		txd_vlan_id = vlan_tx_tag_get(skb) & BITS_MASK(12);
+		txd_vlan_id = skb_vlan_tag_get(skb) & BITS_MASK(12);
 		txd_vtag = 1;
 	}
 
@@ -1919,7 +1919,8 @@ bdx_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 	struct net_device *ndev;
 	struct bdx_priv *priv;
 	int err, pci_using_dac, port;
-	resource_size_t pciaddr, regionSize;
+	unsigned long pciaddr;
+	u32 regionSize;
 	struct pci_nic *nic;
 
 	ENTER;
@@ -2181,11 +2182,6 @@ bdx_get_drvinfo(struct net_device *netdev, struct ethtool_drvinfo *drvinfo)
 	strlcpy(drvinfo->fw_version, "N/A", sizeof(drvinfo->fw_version));
 	strlcpy(drvinfo->bus_info, pci_name(priv->pdev),
 		sizeof(drvinfo->bus_info));
-
-	drvinfo->n_stats = ((priv->stats_flag) ? ARRAY_SIZE(bdx_stat_names) : 0);
-	drvinfo->testinfo_len = 0;
-	drvinfo->regdump_len = 0;
-	drvinfo->eedump_len = 0;
 }
 
 /*

@@ -16,7 +16,6 @@
 #endif
 #include <asm/thread_info.h>
 #include <asm/cpumask.h>
-#include <asm/cpufeature.h>
 
 extern int smp_num_siblings;
 extern unsigned int num_processors;
@@ -36,16 +35,6 @@ DECLARE_PER_CPU_READ_MOSTLY(cpumask_var_t, cpu_core_map);
 DECLARE_PER_CPU_READ_MOSTLY(cpumask_var_t, cpu_llc_shared_map);
 DECLARE_PER_CPU_READ_MOSTLY(u16, cpu_llc_id);
 DECLARE_PER_CPU_READ_MOSTLY(int, cpu_number);
-
-static inline struct cpumask *cpu_sibling_mask(int cpu)
-{
-	return per_cpu(cpu_sibling_map, cpu);
-}
-
-static inline struct cpumask *cpu_core_mask(int cpu)
-{
-	return per_cpu(cpu_core_map, cpu);
-}
 
 static inline struct cpumask *cpu_llc_shared_mask(int cpu)
 {
@@ -150,13 +139,15 @@ static inline void arch_send_call_function_ipi_mask(const struct cpumask *mask)
 }
 
 void cpu_disable_common(void);
-void cpu_die_common(unsigned int cpu);
 void native_smp_prepare_boot_cpu(void);
 void native_smp_prepare_cpus(unsigned int max_cpus);
 void native_smp_cpus_done(unsigned int max_cpus);
+void common_cpu_up(unsigned int cpunum, struct task_struct *tidle);
 int native_cpu_up(unsigned int cpunum, struct task_struct *tidle);
 int native_cpu_disable(void);
+int common_cpu_die(unsigned int cpu);
 void native_cpu_die(unsigned int cpu);
+void hlt_play_dead(void);
 void native_play_dead(void);
 void play_dead_common(void);
 void wbinvd_on_cpu(int cpu);
@@ -177,6 +168,7 @@ static inline int wbinvd_on_all_cpus(void)
 	wbinvd();
 	return 0;
 }
+#define smp_num_siblings	1
 #endif /* CONFIG_SMP */
 
 extern unsigned disabled_cpus;

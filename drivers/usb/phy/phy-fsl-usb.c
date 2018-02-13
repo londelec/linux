@@ -75,7 +75,7 @@ static struct fsl_otg_config fsl_otg_initdata = {
 	.otg_port = 1,
 };
 
-#ifdef CONFIG_PPC32
+#ifdef CONFIG_PPC
 static u32 _fsl_readl_be(const unsigned __iomem *p)
 {
 	return in_be32(p);
@@ -105,20 +105,7 @@ static void (*_fsl_writel)(u32 v, unsigned __iomem *p);
 #else
 #define fsl_readl(addr)		readl(addr)
 #define fsl_writel(val, addr)	writel(val, addr)
-#endif /* CONFIG_PPC32 */
-
-/* Routines to access transceiver ULPI registers */
-u8 view_ulpi(u8 addr)
-{
-	u32 temp;
-
-	temp = 0x40000000 | (addr << 16);
-	fsl_writel(temp, &usb_dr_regs->ulpiview);
-	udelay(1000);
-	while (temp & 0x40)
-		temp = fsl_readl(&usb_dr_regs->ulpiview);
-	return (le32_to_cpu(temp) & 0x0000ff00) >> 8;
-}
+#endif /* CONFIG_PPC */
 
 int write_ulpi(u8 addr, u8 data)
 {
@@ -458,28 +445,6 @@ static void fsl_otg_fsm_del_timer(struct otg_fsm *fsm, enum otg_fsm_timer t)
 		return;
 
 	fsl_otg_del_timer(fsm, timer);
-}
-
-/*
- * Reduce timer count by 1, and find timeout conditions.
- * Called by fsl_otg 1ms timer interrupt
- */
-int fsl_otg_tick_timer(void)
-{
-	struct fsl_otg_timer *tmp_timer, *del_tmp;
-	int expired = 0;
-
-	list_for_each_entry_safe(tmp_timer, del_tmp, &active_timers, list) {
-		tmp_timer->count--;
-		/* check if timer expires */
-		if (!tmp_timer->count) {
-			list_del(&tmp_timer->list);
-			tmp_timer->function(tmp_timer->data);
-			expired = 1;
-		}
-	}
-
-	return expired;
 }
 
 /* Reset controller, not reset the bus */
@@ -914,6 +879,7 @@ int usb_otg_start(struct platform_device *pdev)
 	if (pdata->init && pdata->init(pdev) != 0)
 		return -EINVAL;
 
+#ifdef CONFIG_PPC
 	if (pdata->big_endian_mmio) {
 		_fsl_readl = _fsl_readl_be;
 		_fsl_writel = _fsl_writel_be;
@@ -921,6 +887,7 @@ int usb_otg_start(struct platform_device *pdev)
 		_fsl_readl = _fsl_readl_le;
 		_fsl_writel = _fsl_writel_le;
 	}
+#endif
 
 	/* request irq */
 	p_otg->irq = platform_get_irq(pdev, 0);

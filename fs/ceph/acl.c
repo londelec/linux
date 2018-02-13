@@ -40,20 +40,6 @@ static inline void ceph_set_cached_acl(struct inode *inode,
 	spin_unlock(&ci->i_ceph_lock);
 }
 
-static inline struct posix_acl *ceph_get_cached_acl(struct inode *inode,
-							int type)
-{
-	struct ceph_inode_info *ci = ceph_inode(inode);
-	struct posix_acl *acl = ACL_NOT_CACHED;
-
-	spin_lock(&ci->i_ceph_lock);
-	if (__ceph_caps_issued_mask(ci, CEPH_CAP_XATTR_SHARED, 0))
-		acl = get_cached_acl(inode, type);
-	spin_unlock(&ci->i_ceph_lock);
-
-	return acl;
-}
-
 struct posix_acl *ceph_get_acl(struct inode *inode, int type)
 {
 	int size;
@@ -108,11 +94,9 @@ int ceph_set_acl(struct inode *inode, struct posix_acl *acl, int type)
 	case ACL_TYPE_ACCESS:
 		name = POSIX_ACL_XATTR_ACCESS;
 		if (acl) {
-			ret = posix_acl_equiv_mode(acl, &new_mode);
-			if (ret < 0)
+			ret = posix_acl_update_mode(inode, &new_mode, &acl);
+			if (ret)
 				goto out;
-			if (ret == 0)
-				acl = NULL;
 		}
 		break;
 	case ACL_TYPE_DEFAULT:
@@ -144,7 +128,7 @@ int ceph_set_acl(struct inode *inode, struct posix_acl *acl, int type)
 	if (new_mode != old_mode) {
 		newattrs.ia_mode = new_mode;
 		newattrs.ia_valid = ATTR_MODE;
-		ret = ceph_setattr(dentry, &newattrs);
+		ret = __ceph_setattr(dentry, &newattrs);
 		if (ret)
 			goto out_dput;
 	}
@@ -154,7 +138,7 @@ int ceph_set_acl(struct inode *inode, struct posix_acl *acl, int type)
 		if (new_mode != old_mode) {
 			newattrs.ia_mode = old_mode;
 			newattrs.ia_valid = ATTR_MODE;
-			ceph_setattr(dentry, &newattrs);
+			__ceph_setattr(dentry, &newattrs);
 		}
 		goto out_dput;
 	}
@@ -201,10 +185,10 @@ int ceph_pre_init_acls(struct inode *dir, umode_t *mode,
 		val_size2 = posix_acl_xattr_size(default_acl->a_count);
 
 	err = -ENOMEM;
-	tmp_buf = kmalloc(max(val_size1, val_size2), GFP_NOFS);
+	tmp_buf = kmalloc(max(val_size1, val_size2), GFP_KERNEL);
 	if (!tmp_buf)
 		goto out_err;
-	pagelist = kmalloc(sizeof(struct ceph_pagelist), GFP_NOFS);
+	pagelist = kmalloc(sizeof(struct ceph_pagelist), GFP_KERNEL);
 	if (!pagelist)
 		goto out_err;
 	ceph_pagelist_init(pagelist);

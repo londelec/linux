@@ -38,6 +38,8 @@ static inline char *check_image_kernel(struct swsusp_info *info)
 }
 #endif /* CONFIG_ARCH_HIBERNATION_HEADER */
 
+extern int hibernate_resume_nonboot_cpu_disable(void);
+
 /*
  * Keep some memory free so that I/O operations can succeed without paging
  * [Might this be more than 4 MB?]
@@ -162,15 +164,6 @@ extern void swsusp_close(fmode_t);
 #ifdef CONFIG_SUSPEND
 extern int swsusp_unmark(void);
 #endif
-
-/* kernel/power/block_io.c */
-extern struct block_device *hib_resume_bdev;
-
-extern int hib_bio_read_page(pgoff_t page_off, void *addr,
-		struct bio **bio_chain);
-extern int hib_bio_write_page(pgoff_t page_off, void *addr,
-		struct bio **bio_chain);
-extern int hib_wait_on_bio_chain(struct bio **bio_chain);
 
 struct timeval;
 /* kernel/power/swsusp.c */

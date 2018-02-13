@@ -1895,14 +1895,14 @@ static netdev_tx_t sky2_xmit_frame(struct sk_buff *skb,
 	ctrl = 0;
 
 	/* Add VLAN tag, can piggyback on LRGLEN or ADDR64 */
-	if (vlan_tx_tag_present(skb)) {
+	if (skb_vlan_tag_present(skb)) {
 		if (!le) {
 			le = get_tx_le(sky2, &slot);
 			le->addr = 0;
 			le->opcode = OP_VLAN|HW_OWNER;
 		} else
 			le->opcode |= OP_VLAN;
-		le->length = cpu_to_be16(vlan_tx_tag_get(skb));
+		le->length = cpu_to_be16(skb_vlan_tag_get(skb));
 		ctrl |= INS_VLAN;
 	}
 
@@ -2594,7 +2594,7 @@ static struct sk_buff *sky2_receive(struct net_device *dev,
 	sky2->rx_next = (sky2->rx_next + 1) % sky2->rx_pending;
 	prefetch(sky2->rx_ring + sky2->rx_next);
 
-	if (vlan_tx_tag_present(re->skb))
+	if (skb_vlan_tag_present(re->skb))
 		count -= VLAN_HLEN;	/* Account for vlan tag */
 
 	/* This chip has hardware problems that generates bogus status.
@@ -4819,6 +4819,18 @@ static struct net_device *sky2_init_netdev(struct sky2_hw *hw, unsigned port,
 		memcpy_fromio(dev->dev_addr, hw->regs + B2_MAC_1 + port * 8,
 			      ETH_ALEN);
 
+	/* if the address is invalid, use a random value */
+	if (!is_valid_ether_addr(dev->dev_addr)) {
+		struct sockaddr sa = { AF_UNSPEC };
+
+		netdev_warn(dev,
+			    "Invalid MAC address, defaulting to random\n");
+		eth_hw_addr_random(dev);
+		memcpy(sa.sa_data, dev->dev_addr, ETH_ALEN);
+		if (sky2_set_mac_address(dev, &sa))
+			netdev_warn(dev, "Failed to set MAC address.\n");
+	}
+
 	return dev;
 }
 
@@ -5208,6 +5220,19 @@ static SIMPLE_DEV_PM_OPS(sky2_pm_ops, sky2_suspend, sky2_resume);
 
 static void sky2_shutdown(struct pci_dev *pdev)
 {
+	struct sky2_hw *hw = pci_get_drvdata(pdev);
+	int port;
+
+	for (port = 0; port < hw->ports; port++) {
+		struct net_device *ndev = hw->dev[port];
+
+		rtnl_lock();
+		if (netif_running(ndev)) {
+			dev_close(ndev);
+			netif_device_detach(ndev);
+		}
+		rtnl_unlock();
+	}
 	sky2_suspend(&pdev->dev);
 	pci_wake_from_d3(pdev, device_may_wakeup(&pdev->dev));
 	pci_set_power_state(pdev, PCI_D3hot);

@@ -2,16 +2,40 @@
 #define _LINUX_COMPACTION_H
 
 /* Return values for compact_zone() and try_to_compact_pages() */
-/* compaction didn't start as it was deferred due to past failures */
-#define COMPACT_DEFERRED	0
-/* compaction didn't start as it was not possible or direct reclaim was more suitable */
-#define COMPACT_SKIPPED		1
-/* compaction should continue to another pageblock */
-#define COMPACT_CONTINUE	2
-/* direct compaction partially compacted a zone and there are suitable pages */
-#define COMPACT_PARTIAL		3
-/* The full zone was compacted */
-#define COMPACT_COMPLETE	4
+/* When adding new states, please adjust include/trace/events/compaction.h */
+enum compact_result {
+	/*
+	 * compaction didn't start as it was not possible or direct reclaim
+	 * was more suitable
+	 */
+	COMPACT_SKIPPED,
+	/* compaction didn't start as it was deferred due to past failures */
+	COMPACT_DEFERRED,
+	/* compaction not active last round */
+	COMPACT_INACTIVE = COMPACT_DEFERRED,
+
+	/* compaction should continue to another pageblock */
+	COMPACT_CONTINUE,
+	/*
+	 * direct compaction partially compacted a zone and there are suitable
+	 * pages
+	 */
+	COMPACT_PARTIAL,
+	/*
+	 * direct compaction has scanned part of the zone but wasn't successfull
+	 * to compact suitable pages.
+	 */
+	COMPACT_PARTIAL_SKIPPED,
+	/*
+	 * The full zone was compacted scanned but wasn't successfull to compact
+	 * suitable pages.
+	 */
+	COMPACT_COMPLETE,
+	/* For more detailed tracepoint output */
+	COMPACT_NO_SUITABLE_PAGE,
+	COMPACT_NOT_SUITABLE_ZONE,
+	COMPACT_CONTENDED,
+};
 
 /* Used to signal whether compaction detected need_sched() or lock contention */
 /* No contention detected */
@@ -21,6 +45,8 @@
 /* Zone lock or lru_lock was contended in async compaction */
 #define COMPACT_CONTENDED_LOCK	2
 
+struct alloc_context; /* in mm/internal.h */
+
 #ifdef CONFIG_COMPACTION
 extern int sysctl_compact_memory;
 extern int sysctl_compaction_handler(struct ctl_table *table, int write,
@@ -28,83 +54,96 @@ extern int sysctl_compaction_handler(struct ctl_table *table, int write,
 extern int sysctl_extfrag_threshold;
 extern int sysctl_extfrag_handler(struct ctl_table *table, int write,
 			void __user *buffer, size_t *length, loff_t *ppos);
+extern int sysctl_compact_unevictable_allowed;
 
 extern int fragmentation_index(struct zone *zone, unsigned int order);
-extern unsigned long try_to_compact_pages(struct zonelist *zonelist,
-			int order, gfp_t gfp_mask, nodemask_t *mask,
-			enum migrate_mode mode, int *contended,
-			int alloc_flags, int classzone_idx);
+extern enum compact_result try_to_compact_pages(gfp_t gfp_mask,
+			unsigned int order,
+		unsigned int alloc_flags, const struct alloc_context *ac,
+		enum migrate_mode mode, int *contended);
 extern void compact_pgdat(pg_data_t *pgdat, int order);
 extern void reset_isolation_suitable(pg_data_t *pgdat);
-extern unsigned long compaction_suitable(struct zone *zone, int order,
-					int alloc_flags, int classzone_idx);
+extern enum compact_result compaction_suitable(struct zone *zone, int order,
+		unsigned int alloc_flags, int classzone_idx);
 
-/* Do not skip compaction more than 64 times */
-#define COMPACT_MAX_DEFER_SHIFT 6
+extern void defer_compaction(struct zone *zone, int order);
+extern bool compaction_deferred(struct zone *zone, int order);
+extern void compaction_defer_reset(struct zone *zone, int order,
+				bool alloc_success);
+extern bool compaction_restarting(struct zone *zone, int order);
 
-/*
- * Compaction is deferred when compaction fails to result in a page
- * allocation success. 1 << compact_defer_limit compactions are skipped up
- * to a limit of 1 << COMPACT_MAX_DEFER_SHIFT
- */
-static inline void defer_compaction(struct zone *zone, int order)
+/* Compaction has made some progress and retrying makes sense */
+static inline bool compaction_made_progress(enum compact_result result)
 {
-	zone->compact_considered = 0;
-	zone->compact_defer_shift++;
+	/*
+	 * Even though this might sound confusing this in fact tells us
+	 * that the compaction successfully isolated and migrated some
+	 * pageblocks.
+	 */
+	if (result == COMPACT_PARTIAL)
+		return true;
 
-	if (order < zone->compact_order_failed)
-		zone->compact_order_failed = order;
-
-	if (zone->compact_defer_shift > COMPACT_MAX_DEFER_SHIFT)
-		zone->compact_defer_shift = COMPACT_MAX_DEFER_SHIFT;
+	return false;
 }
 
-/* Returns true if compaction should be skipped this time */
-static inline bool compaction_deferred(struct zone *zone, int order)
+/* Compaction has failed and it doesn't make much sense to keep retrying. */
+static inline bool compaction_failed(enum compact_result result)
 {
-	unsigned long defer_limit = 1UL << zone->compact_defer_shift;
+	/* All zones were scanned completely and still not result. */
+	if (result == COMPACT_COMPLETE)
+		return true;
 
-	if (order < zone->compact_order_failed)
-		return false;
-
-	/* Avoid possible overflow */
-	if (++zone->compact_considered > defer_limit)
-		zone->compact_considered = defer_limit;
-
-	return zone->compact_considered < defer_limit;
+	return false;
 }
 
 /*
- * Update defer tracking counters after successful compaction of given order,
- * which means an allocation either succeeded (alloc_success == true) or is
- * expected to succeed.
+ * Compaction  has backed off for some reason. It might be throttling or
+ * lock contention. Retrying is still worthwhile.
  */
-static inline void compaction_defer_reset(struct zone *zone, int order,
-		bool alloc_success)
+static inline bool compaction_withdrawn(enum compact_result result)
 {
-	if (alloc_success) {
-		zone->compact_considered = 0;
-		zone->compact_defer_shift = 0;
-	}
-	if (order >= zone->compact_order_failed)
-		zone->compact_order_failed = order + 1;
+	/*
+	 * Compaction backed off due to watermark checks for order-0
+	 * so the regular reclaim has to try harder and reclaim something.
+	 */
+	if (result == COMPACT_SKIPPED)
+		return true;
+
+	/*
+	 * If compaction is deferred for high-order allocations, it is
+	 * because sync compaction recently failed. If this is the case
+	 * and the caller requested a THP allocation, we do not want
+	 * to heavily disrupt the system, so we fail the allocation
+	 * instead of entering direct reclaim.
+	 */
+	if (result == COMPACT_DEFERRED)
+		return true;
+
+	/*
+	 * If compaction in async mode encounters contention or blocks higher
+	 * priority task we back off early rather than cause stalls.
+	 */
+	if (result == COMPACT_CONTENDED)
+		return true;
+
+	/*
+	 * Page scanners have met but we haven't scanned full zones so this
+	 * is a back off in fact.
+	 */
+	if (result == COMPACT_PARTIAL_SKIPPED)
+		return true;
+
+	return false;
 }
 
-/* Returns true if restarting compaction after many failures */
-static inline bool compaction_restarting(struct zone *zone, int order)
-{
-	if (order < zone->compact_order_failed)
-		return false;
-
-	return zone->compact_defer_shift == COMPACT_MAX_DEFER_SHIFT &&
-		zone->compact_considered >= 1UL << zone->compact_defer_shift;
-}
+bool compaction_zonelist_suitable(struct alloc_context *ac, int order,
+					int alloc_flags);
 
 #else
-static inline unsigned long try_to_compact_pages(struct zonelist *zonelist,
-			int order, gfp_t gfp_mask, nodemask_t *nodemask,
-			enum migrate_mode mode, int *contended,
-			int alloc_flags, int classzone_idx)
+static inline enum compact_result try_to_compact_pages(gfp_t gfp_mask,
+			unsigned int order, int alloc_flags,
+			const struct alloc_context *ac,
+			enum migrate_mode mode, int *contended)
 {
 	return COMPACT_CONTINUE;
 }
@@ -117,7 +156,7 @@ static inline void reset_isolation_suitable(pg_data_t *pgdat)
 {
 }
 
-static inline unsigned long compaction_suitable(struct zone *zone, int order,
+static inline enum compact_result compaction_suitable(struct zone *zone, int order,
 					int alloc_flags, int classzone_idx)
 {
 	return COMPACT_SKIPPED;
@@ -132,6 +171,20 @@ static inline bool compaction_deferred(struct zone *zone, int order)
 	return true;
 }
 
+static inline bool compaction_made_progress(enum compact_result result)
+{
+	return false;
+}
+
+static inline bool compaction_failed(enum compact_result result)
+{
+	return false;
+}
+
+static inline bool compaction_withdrawn(enum compact_result result)
+{
+	return true;
+}
 #endif /* CONFIG_COMPACTION */
 
 #if defined(CONFIG_COMPACTION) && defined(CONFIG_SYSFS) && defined(CONFIG_NUMA)

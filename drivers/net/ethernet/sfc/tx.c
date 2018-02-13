@@ -431,8 +431,20 @@ finish_packet:
 	efx_tx_maybe_stop_queue(tx_queue);
 
 	/* Pass off to hardware */
-	if (!skb->xmit_more || netif_xmit_stopped(tx_queue->core_txq))
+	if (!skb->xmit_more || netif_xmit_stopped(tx_queue->core_txq)) {
+		struct efx_tx_queue *txq2 = efx_tx_queue_partner(tx_queue);
+
+		/* There could be packets left on the partner queue if those
+		 * SKBs had skb->xmit_more set. If we do not push those they
+		 * could be left for a long time and cause a netdev watchdog.
+		 */
+		if (txq2->xmit_more_available)
+			efx_nic_push_buffers(txq2);
+
 		efx_nic_push_buffers(tx_queue);
+	} else {
+		tx_queue->xmit_more_available = skb->xmit_more;
+	}
 
 	tx_queue->tx_packets++;
 
@@ -550,13 +562,19 @@ void efx_init_tx_queue_core_txq(struct efx_tx_queue *tx_queue)
 				     efx->n_tx_channels : 0));
 }
 
-int efx_setup_tc(struct net_device *net_dev, u8 num_tc)
+int efx_setup_tc(struct net_device *net_dev, u32 handle, __be16 proto,
+		 struct tc_to_netdev *ntc)
 {
 	struct efx_nic *efx = netdev_priv(net_dev);
 	struct efx_channel *channel;
 	struct efx_tx_queue *tx_queue;
-	unsigned tc;
+	unsigned tc, num_tc;
 	int rc;
+
+	if (handle != TC_H_ROOT || ntc->type != TC_SETUP_MQPRIO)
+		return -EINVAL;
+
+	num_tc = ntc->tc;
 
 	if (efx_nic_rev(efx) < EFX_REV_FALCON_B0 || num_tc > EFX_MAX_TX_TC)
 		return -EINVAL;
@@ -617,7 +635,8 @@ void efx_xmit_done(struct efx_tx_queue *tx_queue, unsigned int index)
 	EFX_BUG_ON_PARANOID(index > tx_queue->ptr_mask);
 
 	efx_dequeue_buffers(tx_queue, index, &pkts_compl, &bytes_compl);
-	netdev_tx_completed_queue(tx_queue->core_txq, pkts_compl, bytes_compl);
+	tx_queue->pkts_compl += pkts_compl;
+	tx_queue->bytes_compl += bytes_compl;
 
 	if (pkts_compl > 1)
 		++tx_queue->merge_events;
@@ -721,6 +740,7 @@ void efx_init_tx_queue(struct efx_tx_queue *tx_queue)
 	tx_queue->read_count = 0;
 	tx_queue->old_read_count = 0;
 	tx_queue->empty_read_count = 0 | EFX_EMPTY_COUNT_VALID;
+	tx_queue->xmit_more_available = false;
 
 	/* Set up TX descriptor ring */
 	efx_nic_init_tx(tx_queue);
@@ -746,6 +766,7 @@ void efx_fini_tx_queue(struct efx_tx_queue *tx_queue)
 
 		++tx_queue->read_count;
 	}
+	tx_queue->xmit_more_available = false;
 	netdev_tx_reset_queue(tx_queue->core_txq);
 }
 
@@ -1301,8 +1322,20 @@ static int efx_enqueue_skb_tso(struct efx_tx_queue *tx_queue,
 	efx_tx_maybe_stop_queue(tx_queue);
 
 	/* Pass off to hardware */
-	if (!skb->xmit_more || netif_xmit_stopped(tx_queue->core_txq))
+	if (!skb->xmit_more || netif_xmit_stopped(tx_queue->core_txq)) {
+		struct efx_tx_queue *txq2 = efx_tx_queue_partner(tx_queue);
+
+		/* There could be packets left on the partner queue if those
+		 * SKBs had skb->xmit_more set. If we do not push those they
+		 * could be left for a long time and cause a netdev watchdog.
+		 */
+		if (txq2->xmit_more_available)
+			efx_nic_push_buffers(txq2);
+
 		efx_nic_push_buffers(tx_queue);
+	} else {
+		tx_queue->xmit_more_available = skb->xmit_more;
+	}
 
 	tx_queue->tso_bursts++;
 	return NETDEV_TX_OK;

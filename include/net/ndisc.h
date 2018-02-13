@@ -156,24 +156,7 @@ static inline u32 ndisc_hashfn(const void *pkey, const struct net_device *dev, _
 
 static inline struct neighbour *__ipv6_neigh_lookup_noref(struct net_device *dev, const void *pkey)
 {
-	struct neigh_hash_table *nht;
-	const u32 *p32 = pkey;
-	struct neighbour *n;
-	u32 hash_val;
-
-	nht = rcu_dereference_bh(nd_tbl.nht);
-	hash_val = ndisc_hashfn(pkey, dev, nht->hash_rnd) >> (32 - nht->hash_shift);
-	for (n = rcu_dereference_bh(nht->hash_buckets[hash_val]);
-	     n != NULL;
-	     n = rcu_dereference_bh(n->next)) {
-		u32 *n32 = (u32 *) n->primary_key;
-		if (n->dev == dev &&
-		    ((n32[0] ^ p32[0]) | (n32[1] ^ p32[1]) |
-		     (n32[2] ^ p32[2]) | (n32[3] ^ p32[3])) == 0)
-			return n;
-	}
-
-	return NULL;
+	return ___neigh_lookup_noref(&nd_tbl, neigh_key_eq128, ndisc_hashfn, pkey, dev);
 }
 
 static inline struct neighbour *__ipv6_neigh_lookup(struct net_device *dev, const void *pkey)
@@ -189,6 +172,23 @@ static inline struct neighbour *__ipv6_neigh_lookup(struct net_device *dev, cons
 	return n;
 }
 
+static inline void __ipv6_confirm_neigh(struct net_device *dev,
+					const void *pkey)
+{
+	struct neighbour *n;
+
+	rcu_read_lock_bh();
+	n = __ipv6_neigh_lookup_noref(dev, pkey);
+	if (n) {
+		unsigned long now = jiffies;
+
+		/* avoid dirtying neighbour */
+		if (n->confirmed != now)
+			n->confirmed = now;
+	}
+	rcu_read_unlock_bh();
+}
+
 int ndisc_init(void);
 int ndisc_late_init(void);
 
@@ -197,14 +197,12 @@ void ndisc_cleanup(void);
 
 int ndisc_rcv(struct sk_buff *skb);
 
-void ndisc_send_ns(struct net_device *dev, struct neighbour *neigh,
-		   const struct in6_addr *solicit,
+void ndisc_send_ns(struct net_device *dev, const struct in6_addr *solicit,
 		   const struct in6_addr *daddr, const struct in6_addr *saddr);
 
 void ndisc_send_rs(struct net_device *dev,
 		   const struct in6_addr *saddr, const struct in6_addr *daddr);
-void ndisc_send_na(struct net_device *dev, struct neighbour *neigh,
-		   const struct in6_addr *daddr,
+void ndisc_send_na(struct net_device *dev, const struct in6_addr *daddr,
 		   const struct in6_addr *solicited_addr,
 		   bool router, bool solicited, bool override, bool inc_opt);
 
