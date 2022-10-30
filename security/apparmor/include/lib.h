@@ -1,14 +1,10 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * AppArmor security module
  *
  * This file contains AppArmor lib definitions
  *
- * 2016 Canonical Ltd.
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License as
- * published by the Free Software Foundation, version 2 of the
- * License.
+ * 2017 Canonical Ltd.
  */
 
 #ifndef __AA_LIB_H
@@ -16,70 +12,58 @@
 
 #include <linux/slab.h>
 #include <linux/fs.h>
+#include <linux/lsm_hooks.h>
 
 #include "match.h"
-
-/* Provide our own test for whether a write lock is held for asserts
- * this is because on none SMP systems write_can_lock will always
- * resolve to true, which is what you want for code making decisions
- * based on it, but wrong for asserts checking that the lock is held
- */
-#ifdef CONFIG_SMP
-#define write_is_locked(X) !write_can_lock(X)
-#else
-#define write_is_locked(X) (1)
-#endif /* CONFIG_SMP */
 
 /*
  * DEBUG remains global (no per profile flag) since it is mostly used in sysctl
  * which is not related to profile accesses.
  */
 
-#define DEBUG_ON (aa_g_debug && printk_ratelimit())
-#define dbg_printk(__fmt, __args...) printk(KERN_DEBUG __fmt, ##__args)
+#define DEBUG_ON (aa_g_debug)
+/*
+ * split individual debug cases out in preparation for finer grained
+ * debug controls in the future.
+ */
+#define AA_DEBUG_LABEL DEBUG_ON
+#define dbg_printk(__fmt, __args...) pr_debug(__fmt, ##__args)
 #define AA_DEBUG(fmt, args...)						\
 	do {								\
 		if (DEBUG_ON)						\
-			dbg_printk("AppArmor: " fmt, ##args);		\
+			pr_debug_ratelimited("AppArmor: " fmt, ##args);	\
 	} while (0)
 
-#define AA_WARN(X) WARN((X), "APPARMOR WARN %s: %s\n", __FUNCTION__, #X)
+#define AA_WARN(X) WARN((X), "APPARMOR WARN %s: %s\n", __func__, #X)
 
-#define AA_BUG(X, args...) AA_BUG_FMT((X), "" args )
+#define AA_BUG(X, args...)						    \
+	do {								    \
+		_Pragma("GCC diagnostic ignored \"-Wformat-zero-length\""); \
+		AA_BUG_FMT((X), "" args);				    \
+		_Pragma("GCC diagnostic warning \"-Wformat-zero-length\""); \
+	} while (0)
+#ifdef CONFIG_SECURITY_APPARMOR_DEBUG_ASSERTS
 #define AA_BUG_FMT(X, fmt, args...)					\
-	WARN((X), "AppArmor WARN %s: (" #X "): " fmt, __FUNCTION__ , ##args )
+	WARN((X), "AppArmor WARN %s: (" #X "): " fmt, __func__, ##args)
+#else
+#define AA_BUG_FMT(X, fmt, args...) no_printk(fmt, ##args)
+#endif
 
 #define AA_ERROR(fmt, args...)						\
-	do {								\
-		if (printk_ratelimit())					\
-			printk(KERN_ERR "AppArmor: " fmt, ##args);	\
-	} while (0)
+	pr_err_ratelimited("AppArmor: " fmt, ##args)
 
 /* Flag indicating whether initialization completed */
-extern int apparmor_initialized __initdata;
+extern int apparmor_initialized;
 
 /* fn's in lib */
+const char *skipn_spaces(const char *str, size_t n);
 char *aa_split_fqname(char *args, char **ns_name);
 const char *aa_splitn_fqname(const char *fqname, size_t n, const char **ns_name,
 			     size_t *ns_len);
 void aa_info_message(const char *str);
-void *__aa_kvmalloc(size_t size, gfp_t flags);
 
-static inline void *kvmalloc(size_t size)
-{
-	return __aa_kvmalloc(size, 0);
-}
-
-static inline void *kvzalloc(size_t size)
-{
-	return __aa_kvmalloc(size, __GFP_ZERO);
-}
-
-/* returns 0 if kref not incremented */
-static inline int kref_get_not0(struct kref *kref)
-{
-	return atomic_inc_not_zero(&kref->refcount);
-}
+/* Security blob offsets */
+extern struct lsm_blob_sizes apparmor_blob_sizes;
 
 /**
  * aa_strneq - compare null terminated @str to a non null terminated substring
@@ -112,7 +96,7 @@ static inline unsigned int aa_dfa_null_transition(struct aa_dfa *dfa,
 
 static inline bool path_mediated_fs(struct dentry *dentry)
 {
-	return !(dentry->d_sb->s_flags & MS_NOUSER);
+	return !(dentry->d_sb->s_flags & SB_NOUSER);
 }
 
 
@@ -122,7 +106,7 @@ struct counted_str {
 };
 
 #define str_to_counted(str) \
-	((struct counted_str *)(str - offsetof(struct counted_str,name)))
+	((struct counted_str *)(str - offsetof(struct counted_str, name)))
 
 #define __counted	/* atm just a notation */
 
@@ -144,12 +128,10 @@ static inline void aa_put_str(__counted char *str)
 		kref_put(&str_to_counted(str)->count, aa_str_kref);
 }
 
-const char *aa_imode_name(umode_t mode);
-
 
 /* struct aa_policy - common part of both namespaces and profiles
  * @name: name of the object
- * @hname - The hierarchical name, NOTE: is .name of struct counted_str
+ * @hname - The hierarchical name
  * @list: list policy object is on
  * @profiles: head of the profiles list contained in the object
  */
@@ -160,8 +142,6 @@ struct aa_policy {
 	struct list_head profiles;
 };
 
-#define aa_peer_name(peer) (peer)->base.hname
-
 /**
  * basename - find the last component of an hname
  * @name: hname to find the base profile name component of  (NOT NULL)
@@ -171,6 +151,7 @@ struct aa_policy {
 static inline const char *basename(const char *hname)
 {
 	char *split;
+
 	hname = strim((char *)hname);
 	for (split = strstr(hname, "//"); split; split = strstr(hname, "//"))
 		hname = split + 2;
@@ -213,7 +194,7 @@ static inline struct aa_policy *__policy_find(struct list_head *head,
  * other wise it allows searching for policy by a partial match of name
  */
 static inline struct aa_policy *__policy_strn_find(struct list_head *head,
-						   const char *str, int len)
+					    const char *str, int len)
 {
 	struct aa_policy *policy;
 
@@ -285,7 +266,7 @@ void aa_policy_destroy(struct aa_policy *policy);
 			vec_cleanup(profile, __pvec, __count);		\
 		} else							\
 			__new_ = NULL;					\
-	__cleanup:							\
+__cleanup:								\
 		vec_cleanup(label, __lvec, (L)->size);			\
 	} else {							\
 		(P) = labels_profile(L);				\

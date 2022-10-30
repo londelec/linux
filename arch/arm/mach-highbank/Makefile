@@ -1,8 +1,4 @@
-KBUILD_CFLAGS += -I$(srctree)/arch/arm/mach-highbank/include
-
+# SPDX-License-Identifier: GPL-2.0-only
 obj-y					:= highbank.o system.o smc.o
-
-plus_sec := $(call as-instr,.arch_extension sec,+sec)
-AFLAGS_smc.o				:=-Wa,-march=armv7-a$(plus_sec)
 
 obj-$(CONFIG_PM_SLEEP)			+= pm.o

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*****************************************************************************/
 /* srp.h -- SCSI RDMA Protocol definitions                                   */
 /*                                                                           */
@@ -5,15 +6,6 @@
 /*                                                                           */
 /* Copyright (C) 2003 IBM Corporation                                        */
 /*                                                                           */
-/* This program is free software; you can redistribute it and/or modify      */
-/* it under the terms of the GNU General Public License as published by      */
-/* the Free Software Foundation; either version 2 of the License, or         */
-/* (at your option) any later version.                                       */
-/*                                                                           */
-/* This program is distributed in the hope that it will be useful,           */
-/* but WITHOUT ANY WARRANTY; without even the implied warranty of            */
-/* MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the             */
-/* GNU General Public License for more details.                              */
 /*                                                                           */
 /* This file contains structures and definitions for IBM RPA (RS/6000        */
 /* platform architecture) implementation of the SRP (SCSI RDMA Protocol)     */
@@ -46,13 +38,25 @@ union srp_iu {
 	u8 reserved[SRP_MAX_IU_LEN];
 };
 
+enum viosrp_crq_headers {
+	VIOSRP_CRQ_FREE = 0x00,
+	VIOSRP_CRQ_CMD_RSP = 0x80,
+	VIOSRP_CRQ_INIT_RSP = 0xC0,
+	VIOSRP_CRQ_XPORT_EVENT = 0xFF
+};
+
+enum viosrp_crq_init_formats {
+	VIOSRP_CRQ_INIT = 0x01,
+	VIOSRP_CRQ_INIT_COMPLETE = 0x02
+};
+
 enum viosrp_crq_formats {
 	VIOSRP_SRP_FORMAT = 0x01,
 	VIOSRP_MAD_FORMAT = 0x02,
 	VIOSRP_OS400_FORMAT = 0x03,
 	VIOSRP_AIX_FORMAT = 0x04,
-	VIOSRP_LINUX_FORMAT = 0x06,
-	VIOSRP_INLINE_FORMAT = 0x07
+	VIOSRP_LINUX_FORMAT = 0x05,
+	VIOSRP_INLINE_FORMAT = 0x06
 };
 
 enum viosrp_crq_status {
@@ -66,12 +70,17 @@ enum viosrp_crq_status {
 };
 
 struct viosrp_crq {
-	u8 valid;		/* used by RPA */
-	u8 format;		/* SCSI vs out-of-band */
-	u8 reserved;
-	u8 status;		/* non-scsi failure? (e.g. DMA failure) */
-	__be16 timeout;		/* in seconds */
-	__be16 IU_length;		/* in bytes */
+	union {
+		__be64 high;			/* High 64 bits */
+		struct {
+			u8 valid;		/* used by RPA */
+			u8 format;		/* SCSI vs out-of-band */
+			u8 reserved;
+			u8 status;		/* non-scsi failure? (e.g. DMA failure) */
+			__be16 timeout;		/* in seconds */
+			__be16 IU_length;	/* in bytes */
+		};
+	};
 	__be64 IU_data_ptr;	/* the TCE for transferring data */
 };
 
@@ -82,7 +91,6 @@ enum viosrp_mad_types {
 	VIOSRP_EMPTY_IU_TYPE = 0x01,
 	VIOSRP_ERROR_LOG_TYPE = 0x02,
 	VIOSRP_ADAPTER_INFO_TYPE = 0x03,
-	VIOSRP_HOST_CONFIG_TYPE = 0x04,
 	VIOSRP_CAPABILITIES_TYPE = 0x05,
 	VIOSRP_ENABLE_FAST_FAIL = 0x08,
 };
@@ -148,11 +156,6 @@ struct viosrp_adapter_info {
 	__be64 buffer;
 };
 
-struct viosrp_host_config {
-	struct mad_common common;
-	__be64 buffer;
-};
-
 struct viosrp_fast_fail {
 	struct mad_common common;
 };
@@ -190,7 +193,6 @@ union mad_iu {
 	struct viosrp_empty_iu empty_iu;
 	struct viosrp_error_log error_log;
 	struct viosrp_adapter_info adapter_info;
-	struct viosrp_host_config host_config;
 	struct viosrp_fast_fail fast_fail;
 	struct viosrp_capabilities capabilities;
 };
@@ -204,7 +206,10 @@ struct mad_adapter_info_data {
 	char srp_version[8];
 	char partition_name[96];
 	__be32 partition_number;
+#define SRP_MAD_VERSION_1 1
 	__be32 mad_version;
+#define SRP_MAD_OS_LINUX 2
+#define SRP_MAD_OS_AIX 3
 	__be32 os_type;
 	__be32 port_max_txu[8];	/* per-port maximum transfer */
 };

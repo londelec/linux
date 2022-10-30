@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _LINUX_UIDGID_H
 #define _LINUX_UIDGID_H
 
@@ -117,16 +118,6 @@ static inline bool gid_valid(kgid_t gid)
 	return __kgid_val(gid) != (gid_t) -1;
 }
 
-static inline bool uid_valid_eq(kuid_t left, kuid_t right)
-{
-	return uid_eq(left, right) && uid_valid(left);
-}
-
-static inline bool gid_valid_eq(kgid_t left, kgid_t right)
-{
-	return gid_eq(left, right) && gid_valid(left);
-}
-
 #ifdef CONFIG_USER_NS
 
 extern kuid_t make_kuid(struct user_namespace *from, uid_t uid);
@@ -187,12 +178,12 @@ static inline gid_t from_kgid_munged(struct user_namespace *to, kgid_t kgid)
 
 static inline bool kuid_has_mapping(struct user_namespace *ns, kuid_t uid)
 {
-	return true;
+	return uid_valid(uid);
 }
 
 static inline bool kgid_has_mapping(struct user_namespace *ns, kgid_t gid)
 {
-	return true;
+	return gid_valid(gid);
 }
 
 #endif /* CONFIG_USER_NS */

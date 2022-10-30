@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * AppArmor security module
  *
@@ -5,11 +6,6 @@
  *
  * Copyright (C) 1998-2008 Novell/SUSE
  * Copyright 2009-2010 Canonical Ltd.
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License as
- * published by the Free Software Foundation, version 2 of the
- * License.
  */
 
 #ifndef __AA_AUDIT_H
@@ -123,16 +119,23 @@ struct apparmor_audit_data {
 			struct aa_label *peer;
 			union {
 				struct {
-					kuid_t ouid;
 					const char *target;
+					kuid_t ouid;
 				} fs;
+				struct {
+					int rlim;
+					unsigned long max;
+				} rlim;
+				struct {
+					int signal;
+					int unmappedsig;
+				};
 				struct {
 					int type, protocol;
 					struct sock *peer_sk;
 					void *addr;
 					int addrlen;
 				} net;
-				int signal;
 			};
 		};
 		struct {
@@ -140,10 +143,6 @@ struct apparmor_audit_data {
 			const char *ns;
 			long pos;
 		} iface;
-		struct {
-			int rlim;
-			unsigned long max;
-		} rlim;
 		struct {
 			const char *src_name;
 			const char *type;
@@ -155,7 +154,7 @@ struct apparmor_audit_data {
 };
 
 /* macros for dealing with  apparmor_audit_data structure */
-#define aad(SA) (SA)->apparmor_audit_data
+#define aad(SA) ((SA)->apparmor_audit_data)
 #define DEFINE_AUDIT_DATA(NAME, T, X)					\
 	/* TODO: cleanup audit init so we don't need _aad = {0,} */	\
 	struct apparmor_audit_data NAME ## _aad = { .op = (X), };	\
@@ -185,5 +184,10 @@ static inline int complain_error(int error)
 		return 0;
 	return error;
 }
+
+void aa_audit_rule_free(void *vrule);
+int aa_audit_rule_init(u32 field, u32 op, char *rulestr, void **vrule);
+int aa_audit_rule_known(struct audit_krule *rule);
+int aa_audit_rule_match(u32 sid, u32 field, u32 op, void *vrule);
 
 #endif /* __AA_AUDIT_H */

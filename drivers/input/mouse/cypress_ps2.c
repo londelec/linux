@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Cypress Trackpad PS/2 mouse driver
  *
@@ -9,10 +10,6 @@
  * Additional contributors include:
  *   Kamal Mostafa <kamal@canonical.com>
  *   Kyle Fazzari <git@status.e4ward.com>
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License version 2 as published by
- * the Free Software Foundation.
  */
 
 #include <linux/module.h>
@@ -107,7 +104,7 @@ static int cypress_ps2_read_cmd_status(struct psmouse *psmouse,
 	enum psmouse_state old_state;
 	int pktsize;
 
-	ps2_begin_command(&psmouse->ps2dev);
+	ps2_begin_command(ps2dev);
 
 	old_state = psmouse->state;
 	psmouse->state = PSMOUSE_CMD_MODE;
@@ -133,7 +130,7 @@ out:
 	psmouse->state = old_state;
 	psmouse->pktcnt = 0;
 
-	ps2_end_command(&psmouse->ps2dev);
+	ps2_end_command(ps2dev);
 
 	return rc;
 }
@@ -390,9 +387,7 @@ static int cypress_set_input_params(struct input_dev *input,
 	if (ret < 0)
 		return ret;
 
-#if ( CYPRESS_SIMULATED_MT != 1 )
 	__set_bit(INPUT_PROP_SEMI_MT, input->propbit);
-#endif
 
 	input_abs_set_res(input, ABS_X, cytp->tp_res_x);
 	input_abs_set_res(input, ABS_Y, cytp->tp_res_y);
@@ -415,8 +410,6 @@ static int cypress_set_input_params(struct input_dev *input,
 	__set_bit(BTN_LEFT, input->keybit);
 	__set_bit(BTN_RIGHT, input->keybit);
 	__set_bit(BTN_MIDDLE, input->keybit);
-
-	input_set_drvdata(input, cytp);
 
 	return 0;
 }
@@ -480,22 +473,6 @@ static int cypress_parse_packet(struct psmouse *psmouse,
 			((packet[5] & 0x0f) << 8) | packet[7];
 		if (cytp->mode & CYTP_BIT_ABS_PRESSURE)
 			report_data->contacts[1].z = report_data->contacts[0].z;
-#if ( CYPRESS_SIMULATED_MT == 1 )
-		/* simulate contact positions for >2 fingers */
-		if ( report_data->contact_cnt >= 3 ) {
-			int i;
-			for ( i=1; i<report_data->contact_cnt; i++ ) {
-			    report_data->contacts[i].x =
-					    report_data->contacts[0].x
-					    + 100*(i)*((i%2)?-1:1);
-			    report_data->contacts[i].y =
-					    report_data->contacts[0].y;
-			    if (cytp->mode & CYTP_BIT_ABS_PRESSURE)
-				    report_data->contacts[i].z =
-					    report_data->contacts[0].z;
-			}
-		}
-#endif
 	}
 
 	report_data->left = (header_byte & BTN_LEFT_BIT) ? 1 : 0;
@@ -719,7 +696,7 @@ int cypress_init(struct psmouse *psmouse)
 err_exit:
 	/*
 	 * Reset Cypress Trackpad as a standard mouse. Then
-	 * let psmouse driver commmunicating with it as default PS2 mouse.
+	 * let psmouse driver communicating with it as default PS2 mouse.
 	 */
 	cypress_reset(psmouse);
 

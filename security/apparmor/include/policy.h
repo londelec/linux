@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * AppArmor security module
  *
@@ -5,11 +6,6 @@
  *
  * Copyright (C) 1998-2008 Novell/SUSE
  * Copyright 2009-2010 Canonical Ltd.
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License as
- * published by the Free Software Foundation, version 2 of the
- * License.
  */
 
 #ifndef __AA_POLICY_H
@@ -28,10 +24,12 @@
 #include "capability.h"
 #include "domain.h"
 #include "file.h"
+#include "lib.h"
 #include "label.h"
 #include "net.h"
 #include "perms.h"
 #include "resource.h"
+
 
 struct aa_ns;
 
@@ -49,6 +47,10 @@ extern const char *const aa_profile_mode_names[];
 #define KILL_MODE(_profile) PROFILE_MODE((_profile), APPARMOR_KILL)
 
 #define PROFILE_IS_HAT(_profile) ((_profile)->label.flags & FLAG_HAT)
+
+#define CHECK_DEBUG1(_profile) ((_profile)->label.flags & FLAG_DEBUG1)
+
+#define CHECK_DEBUG2(_profile) ((_profile)->label.flags & FLAG_DEBUG2)
 
 #define profile_is_stale(_profile) (label_is_stale(&(_profile)->label))
 
@@ -87,10 +89,11 @@ struct aa_policydb {
  */
 struct aa_data {
 	char *key;
-	size_t size;
+	u32 size;
 	char *data;
 	struct rhash_head head;
 };
+
 
 /* struct aa_profile - basic confinement data
  * @base - base components of the profile (name, refcount, lists, lock ...)
@@ -109,8 +112,8 @@ struct aa_data {
  * @policy: general match rules governing policy
  * @file: The set of rules governing basic file access and domain transitions
  * @caps: capabilities for the profile
- * @net: network controls for the profile
  * @rlimits: rlimits for the profile
+ *
  * @dents: dentries for the profiles file entries in apparmorfs
  * @dirname: name of the profile dir in apparmorfs
  * @data: hashtable for free-form policy aa_data
@@ -136,7 +139,7 @@ struct aa_profile {
 
 	const char *attach;
 	struct aa_dfa *xmatch;
-	int xmatch_len;
+	unsigned int xmatch_len;
 	enum audit_mode audit;
 	long mode;
 	u32 path_flags;
@@ -146,8 +149,14 @@ struct aa_profile {
 	struct aa_policydb policy;
 	struct aa_file_rules file;
 	struct aa_caps caps;
-	struct aa_net net;
+
+	int xattr_count;
+	char **xattrs;
+
 	struct aa_rlimit rlimits;
+
+	int secmark_count;
+	struct aa_secmark *secmark;
 
 	struct aa_loaddata *rawdata;
 	unsigned char *hash;
@@ -169,12 +178,11 @@ extern enum profile_mode aa_g_profile_mode;
 void aa_add_profile(struct aa_policy *common, struct aa_profile *profile);
 
 
-struct aa_label *aa_setup_default_label(void);
-
+void aa_free_proxy_kref(struct kref *kref);
 struct aa_profile *aa_alloc_profile(const char *name, struct aa_proxy *proxy,
 				    gfp_t gfp);
-struct aa_profile *aa_null_profile(struct aa_profile *parent, bool hat,
-				   const char *base, gfp_t gfp);
+struct aa_profile *aa_new_null_profile(struct aa_profile *parent, bool hat,
+				       const char *base, gfp_t gfp);
 void aa_free_profile(struct aa_profile *profile);
 void aa_free_profile_kref(struct kref *kref);
 struct aa_profile *aa_find_child(struct aa_profile *parent, const char *name);
@@ -209,21 +217,21 @@ static inline struct aa_profile *aa_get_newest_profile(struct aa_profile *p)
 	return labels_profile(aa_get_newest_label(&p->label));
 }
 
-#define PROFILE_MEDIATES(P, T)  ((P)->policy.start[(T)])
-/* safe version of POLICY_MEDIATES for full range input */
-static inline unsigned int PROFILE_MEDIATES_SAFE(struct aa_profile *profile,
-						 unsigned char class)
+static inline unsigned int PROFILE_MEDIATES(struct aa_profile *profile,
+					    unsigned char class)
 {
-	if (profile->policy.dfa)
+	if (class <= AA_CLASS_LAST)
+		return profile->policy.start[class];
+	else
 		return aa_dfa_match_len(profile->policy.dfa,
 					profile->policy.start[0], &class, 1);
-	return 0;
 }
 
 static inline unsigned int PROFILE_MEDIATES_AF(struct aa_profile *profile,
 					       u16 AF) {
 	unsigned int state = PROFILE_MEDIATES(profile, AA_CLASS_NET);
-	u16 be_af = cpu_to_be16(AF);
+	__be16 be_af = cpu_to_be16(AF);
+
 	if (!state)
 		return 0;
 	return aa_dfa_match_len(profile->policy.dfa, state, (char *) &be_af, 2);
@@ -253,7 +261,7 @@ static inline struct aa_profile *aa_get_profile(struct aa_profile *p)
  */
 static inline struct aa_profile *aa_get_profile_not0(struct aa_profile *p)
 {
-	if (p && kref_get_not0(&p->label.count))
+	if (p && kref_get_unless_zero(&p->label.count))
 		return p;
 
 	return NULL;
@@ -273,7 +281,7 @@ static inline struct aa_profile *aa_get_profile_rcu(struct aa_profile __rcu **p)
 	rcu_read_lock();
 	do {
 		c = rcu_dereference(*p);
-	} while (c && !kref_get_not0(&c->label.count));
+	} while (c && !kref_get_unless_zero(&c->label.count));
 	rcu_read_unlock();
 
 	return c;
@@ -297,9 +305,11 @@ static inline int AUDIT_MODE(struct aa_profile *profile)
 	return profile->audit;
 }
 
-bool policy_view_capable(struct aa_ns *ns);
-bool policy_admin_capable(struct aa_ns *ns);
-bool aa_may_open_profiles(void);
-int aa_may_manage_policy(struct aa_label *label, struct aa_ns *ns, u32 mask);
+bool aa_policy_view_capable(struct aa_label *label, struct aa_ns *ns);
+bool aa_policy_admin_capable(struct aa_label *label, struct aa_ns *ns);
+int aa_may_manage_policy(struct aa_label *label, struct aa_ns *ns,
+			 u32 mask);
+bool aa_current_policy_view_capable(struct aa_ns *ns);
+bool aa_current_policy_admin_capable(struct aa_ns *ns);
 
 #endif /* __AA_POLICY_H */

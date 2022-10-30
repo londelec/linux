@@ -1,10 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Copyright 2014 IBM Corp.
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version
- * 2 of the License, or (at your option) any later version.
  */
 
 #include <linux/pci.h>
@@ -13,6 +9,10 @@
 #include <misc/cxl.h>
 #include <linux/module.h>
 #include <linux/mount.h>
+#include <linux/pseudo_fs.h>
+#include <linux/sched/mm.h>
+#include <linux/mmu_context.h>
+#include <linux/irqdomain.h>
 
 #include "cxl.h"
 
@@ -35,21 +35,15 @@
 static int cxl_fs_cnt;
 static struct vfsmount *cxl_vfs_mount;
 
-static const struct dentry_operations cxl_fs_dops = {
-	.d_dname	= simple_dname,
-};
-
-static struct dentry *cxl_fs_mount(struct file_system_type *fs_type, int flags,
-				const char *dev_name, void *data)
+static int cxl_fs_init_fs_context(struct fs_context *fc)
 {
-	return mount_pseudo(fs_type, "cxl:", NULL, &cxl_fs_dops,
-			CXL_PSEUDO_FS_MAGIC);
+	return init_pseudo(fc, CXL_PSEUDO_FS_MAGIC) ? 0 : -ENOMEM;
 }
 
 static struct file_system_type cxl_fs_type = {
 	.name		= "cxl",
 	.owner		= THIS_MODULE,
-	.mount		= cxl_fs_mount,
+	.init_fs_context = cxl_fs_init_fs_context,
 	.kill_sb	= kill_anon_super,
 };
 
@@ -64,10 +58,8 @@ static struct file *cxl_getfile(const char *name,
 				const struct file_operations *fops,
 				void *priv, int flags)
 {
-	struct qstr this;
-	struct path path;
 	struct file *file;
-	struct inode *inode = NULL;
+	struct inode *inode;
 	int rc;
 
 	/* strongly inspired by anon_inode_getfile() */
@@ -88,27 +80,15 @@ static struct file *cxl_getfile(const char *name,
 		goto err_fs;
 	}
 
-	file = ERR_PTR(-ENOMEM);
-	this.name = name;
-	this.len = strlen(name);
-	this.hash = 0;
-	path.dentry = d_alloc_pseudo(cxl_vfs_mount->mnt_sb, &this);
-	if (!path.dentry)
+	file = alloc_file_pseudo(inode, cxl_vfs_mount, name,
+				 flags & (O_ACCMODE | O_NONBLOCK), fops);
+	if (IS_ERR(file))
 		goto err_inode;
 
-	path.mnt = mntget(cxl_vfs_mount);
-	d_instantiate(path.dentry, inode);
-
-	file = alloc_file(&path, OPEN_FMODE(flags), fops);
-	if (IS_ERR(file))
-		goto err_dput;
-	file->f_flags = flags & (O_ACCMODE | O_NONBLOCK);
 	file->private_data = priv;
 
 	return file;
 
-err_dput:
-	path_put(&path);
 err_inode:
 	iput(inode);
 err_fs:
@@ -125,12 +105,12 @@ struct cxl_context *cxl_dev_context_init(struct pci_dev *dev)
 	int rc;
 
 	afu = cxl_pci_to_afu(dev);
+	if (IS_ERR(afu))
+		return ERR_CAST(afu);
 
 	ctx = cxl_context_alloc();
-	if (IS_ERR(ctx)) {
-		rc = PTR_ERR(ctx);
-		goto err_dev;
-	}
+	if (!ctx)
+		return ERR_PTR(-ENOMEM);
 
 	ctx->kernelapi = true;
 
@@ -143,7 +123,6 @@ struct cxl_context *cxl_dev_context_init(struct pci_dev *dev)
 
 err_ctx:
 	kfree(ctx);
-err_dev:
 	return ERR_PTR(rc);
 }
 EXPORT_SYMBOL_GPL(cxl_dev_context_init);
@@ -153,15 +132,6 @@ struct cxl_context *cxl_get_context(struct pci_dev *dev)
 	return dev->dev.archdata.cxl_ctx;
 }
 EXPORT_SYMBOL_GPL(cxl_get_context);
-
-struct device *cxl_get_phys_dev(struct pci_dev *dev)
-{
-	struct cxl_afu *afu;
-
-	afu = cxl_pci_to_afu(dev);
-
-	return afu->adapter->dev.parent;
-}
 
 int cxl_release_context(struct cxl_context *ctx)
 {
@@ -189,6 +159,27 @@ static irq_hw_number_t cxl_find_afu_irq(struct cxl_context *ctx, int num)
 	return 0;
 }
 
+
+int cxl_set_priv(struct cxl_context *ctx, void *priv)
+{
+	if (!ctx)
+		return -EINVAL;
+
+	ctx->priv = priv;
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(cxl_set_priv);
+
+void *cxl_get_priv(struct cxl_context *ctx)
+{
+	if (!ctx)
+		return ERR_PTR(-EINVAL);
+
+	return ctx->priv;
+}
+EXPORT_SYMBOL_GPL(cxl_get_priv);
+
 int cxl_allocate_afu_irqs(struct cxl_context *ctx, int num)
 {
 	int res;
@@ -197,7 +188,10 @@ int cxl_allocate_afu_irqs(struct cxl_context *ctx, int num)
 	if (num == 0)
 		num = ctx->afu->pp_irqs;
 	res = afu_allocate_irqs(ctx, num);
-	if (!res && !cpu_has_feature(CPU_FTR_HVMODE)) {
+	if (res)
+		return res;
+
+	if (!cpu_has_feature(CPU_FTR_HVMODE)) {
 		/* In a guest, the PSL interrupt is not multiplexed. It was
 		 * allocated above, and we need to set its handler
 		 */
@@ -205,6 +199,13 @@ int cxl_allocate_afu_irqs(struct cxl_context *ctx, int num)
 		if (hwirq)
 			cxl_map_irq(ctx->afu->adapter, hwirq, cxl_ops->psl_interrupt, ctx, "psl");
 	}
+
+	if (ctx->status == STARTED) {
+		if (cxl_ops->update_ivtes)
+			cxl_ops->update_ivtes(ctx);
+		else WARN(1, "BUG: cxl_allocate_afu_irqs must be called prior to starting the context on this platform\n");
+	}
+
 	return res;
 }
 EXPORT_SYMBOL_GPL(cxl_allocate_afu_irqs);
@@ -274,10 +275,30 @@ int cxl_start_context(struct cxl_context *ctx, u64 wed,
 	if (ctx->status == STARTED)
 		goto out; /* already started */
 
+	/*
+	 * Increment the mapped context count for adapter. This also checks
+	 * if adapter_context_lock is taken.
+	 */
+	rc = cxl_adapter_context_get(ctx->afu->adapter);
+	if (rc)
+		goto out;
+
 	if (task) {
 		ctx->pid = get_task_pid(task, PIDTYPE_PID);
-		ctx->glpid = get_task_pid(task->group_leader, PIDTYPE_PID);
 		kernel = false;
+
+		/* acquire a reference to the task's mm */
+		ctx->mm = get_task_mm(current);
+
+		/* ensure this mm_struct can't be freed */
+		cxl_context_mm_count_get(ctx);
+
+		if (ctx->mm) {
+			/* decrement the use count from above */
+			mmput(ctx->mm);
+			/* make TLBIs for this context global */
+			mm_context_add_copro(ctx->mm);
+		}
 	}
 
 	/*
@@ -286,9 +307,19 @@ int cxl_start_context(struct cxl_context *ctx, u64 wed,
 	 */
 	cxl_ctx_get();
 
+	/* See the comment in afu_ioctl_start_work() */
+	smp_mb();
+
 	if ((rc = cxl_ops->attach_process(ctx, kernel, wed, 0))) {
 		put_pid(ctx->pid);
+		ctx->pid = NULL;
+		cxl_adapter_context_put(ctx->afu->adapter);
 		cxl_ctx_put();
+		if (task) {
+			cxl_context_mm_count_put(ctx);
+			if (ctx->mm)
+				mm_context_remove_copro(ctx->mm);
+		}
 		goto out;
 	}
 
@@ -339,7 +370,7 @@ int cxl_fd_mmap(struct file *file, struct vm_area_struct *vm)
 	return afu_mmap(file, vm);
 }
 EXPORT_SYMBOL_GPL(cxl_fd_mmap);
-unsigned int cxl_fd_poll(struct file *file, struct poll_table_struct *poll)
+__poll_t cxl_fd_poll(struct file *file, struct poll_table_struct *poll)
 {
 	return afu_poll(file, poll);
 }
@@ -409,6 +440,23 @@ struct cxl_context *cxl_fops_get_context(struct file *file)
 }
 EXPORT_SYMBOL_GPL(cxl_fops_get_context);
 
+void cxl_set_driver_ops(struct cxl_context *ctx,
+			struct cxl_afu_driver_ops *ops)
+{
+	WARN_ON(!ops->fetch_event || !ops->event_delivered);
+	atomic_set(&ctx->afu_driver_events, 0);
+	ctx->afu_driver_ops = ops;
+}
+EXPORT_SYMBOL_GPL(cxl_set_driver_ops);
+
+void cxl_context_events_pending(struct cxl_context *ctx,
+				unsigned int new_events)
+{
+	atomic_add(new_events, &ctx->afu_driver_events);
+	wake_up_all(&ctx->wq);
+}
+EXPORT_SYMBOL_GPL(cxl_context_events_pending);
+
 int cxl_start_work(struct cxl_context *ctx,
 		   struct cxl_ioctl_start_work *work)
 {
@@ -476,6 +524,8 @@ EXPORT_SYMBOL_GPL(cxl_perst_reloads_same_image);
 ssize_t cxl_read_adapter_vpd(struct pci_dev *dev, void *buf, size_t count)
 {
 	struct cxl_afu *afu = cxl_pci_to_afu(dev);
+	if (IS_ERR(afu))
+		return -ENODEV;
 
 	return cxl_ops->read_adapter_vpd(afu->adapter, buf, count);
 }

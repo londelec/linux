@@ -1,12 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * pxa168 clock framework source file
  *
  * Copyright (C) 2012 Marvell
  * Chao Xie <xiechao.mail@gmail.com>
- *
- * This file is licensed under the terms of the GNU General Public
- * License version 2. This program is licensed "as is" without any
- * warranty of any kind, whether express or implied.
  */
 
 #include <linux/module.h>
@@ -56,10 +53,10 @@ struct pxa168_clk_unit {
 };
 
 static struct mmp_param_fixed_rate_clk fixed_rate_clks[] = {
-	{PXA168_CLK_CLK32, "clk32", NULL, CLK_IS_ROOT, 32768},
-	{PXA168_CLK_VCTCXO, "vctcxo", NULL, CLK_IS_ROOT, 26000000},
-	{PXA168_CLK_PLL1, "pll1", NULL, CLK_IS_ROOT, 624000000},
-	{PXA168_CLK_USB_PLL, "usb_pll", NULL, CLK_IS_ROOT, 480000000},
+	{PXA168_CLK_CLK32, "clk32", NULL, 0, 32768},
+	{PXA168_CLK_VCTCXO, "vctcxo", NULL, 0, 26000000},
+	{PXA168_CLK_PLL1, "pll1", NULL, 0, 624000000},
+	{PXA168_CLK_USB_PLL, "usb_pll", NULL, 0, 480000000},
 };
 
 static struct mmp_param_fixed_factor_clk fixed_factor_clks[] = {

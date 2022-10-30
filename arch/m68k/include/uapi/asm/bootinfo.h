@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note */
 /*
  * asm/bootinfo.h -- Definition of the Linux/m68k boot information structure
  *
@@ -33,7 +34,7 @@
 struct bi_record {
 	__be16 tag;			/* tag ID */
 	__be16 size;			/* size of record (in bytes) */
-	__be32 data[0];			/* data */
+	__be32 data[];			/* data */
 };
 
 
@@ -81,6 +82,8 @@ struct mem_info {
 #define MACH_Q40		10
 #define MACH_SUN3X		11
 #define MACH_M54XX		12
+#define MACH_M5441X		13
+#define MACH_VIRT		14
 
 
     /*
@@ -165,7 +168,7 @@ struct bootversion {
 	struct {
 		__be32 machtype;
 		__be32 version;
-	} machversions[0];
+	} machversions[];
 } __packed;
 
 #endif /* __ASSEMBLY__ */

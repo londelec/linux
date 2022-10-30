@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * OS info memory interface
  *
@@ -6,6 +7,8 @@
  */
 #ifndef _ASM_S390_OS_INFO_H
 #define _ASM_S390_OS_INFO_H
+
+#include <linux/uio.h>
 
 #define OS_INFO_VERSION_MAJOR	1
 #define OS_INFO_VERSION_MINOR	1
@@ -38,7 +41,20 @@ u32 os_info_csum(struct os_info *os_info);
 
 #ifdef CONFIG_CRASH_DUMP
 void *os_info_old_entry(int nr, unsigned long *size);
-int copy_from_oldmem(void *dest, void *src, size_t count);
+size_t copy_oldmem_iter(struct iov_iter *iter, unsigned long src, size_t count);
+
+static inline int copy_oldmem_kernel(void *dst, unsigned long src, size_t count)
+{
+	struct iov_iter iter;
+	struct kvec kvec;
+
+	kvec.iov_base = dst;
+	kvec.iov_len = count;
+	iov_iter_kvec(&iter, WRITE, &kvec, 1, count);
+	if (copy_oldmem_iter(&iter, src, count) < count)
+		return -EFAULT;
+	return 0;
+}
 #else
 static inline void *os_info_old_entry(int nr, unsigned long *size)
 {

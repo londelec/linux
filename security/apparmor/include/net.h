@@ -1,15 +1,11 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * AppArmor security module
  *
  * This file contains AppArmor network mediation definitions.
  *
  * Copyright (C) 1998-2008 Novell/SUSE
- * Copyright 2009-2014 Canonical Ltd.
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License as
- * published by the Free Software Foundation, version 2 of the
- * License.
+ * Copyright 2009-2017 Canonical Ltd.
  */
 
 #ifndef __AA_NET_H
@@ -53,10 +49,9 @@
 struct aa_sk_ctx {
 	struct aa_label *label;
 	struct aa_label *peer;
-	struct path path;
 };
 
-#define SK_CTX(X) (X)->sk_security
+#define SK_CTX(X) ((X)->sk_security)
 #define SOCK_ctx(X) SOCK_INODE(X)->i_security
 #define DEFINE_AUDIT_NET(NAME, OP, SK, F, T, P)				  \
 	struct lsm_network_audit NAME ## _net = { .sk = (SK),		  \
@@ -73,23 +68,31 @@ struct aa_sk_ctx {
 	DEFINE_AUDIT_NET(NAME, OP, SK, (SK)->sk_family, (SK)->sk_type,	\
 			 (SK)->sk_protocol)
 
-/* struct aa_net - network confinement data
- * @allowed: basic network families permissions
- * @audit_network: which network permissions to force audit
- * @quiet_network: which network permissions to quiet rejects
- */
-struct aa_net {
-	u16 allow[AF_MAX];
-	u16 audit[AF_MAX];
-	u16 quiet[AF_MAX];
+
+#define af_select(FAMILY, FN, DEF_FN)		\
+({						\
+	int __e;				\
+	switch ((FAMILY)) {			\
+	default:				\
+		__e = DEF_FN;			\
+	}					\
+	__e;					\
+})
+
+struct aa_secmark {
+	u8 audit;
+	u8 deny;
+	u32 secid;
+	char *label;
 };
 
-
-extern struct aa_fs_entry aa_fs_entry_network[];
+extern struct aa_sfs_entry aa_sfs_entry_network[];
 
 void audit_net_cb(struct audit_buffer *ab, void *va);
 int aa_profile_af_perm(struct aa_profile *profile, struct common_audit_data *sa,
 		       u32 request, u16 family, int type);
+int aa_af_perm(struct aa_label *label, const char *op, u32 request, u16 family,
+	       int type, int protocol);
 static inline int aa_profile_af_sk_perm(struct aa_profile *profile,
 					struct common_audit_data *sa,
 					u32 request,
@@ -98,27 +101,12 @@ static inline int aa_profile_af_sk_perm(struct aa_profile *profile,
 	return aa_profile_af_perm(profile, sa, request, sk->sk_family,
 				  sk->sk_type);
 }
+int aa_sk_perm(const char *op, u32 request, struct sock *sk);
 
-int aa_sock_perm(const char *op, u32 request, struct socket *sock);
-int aa_sock_create_perm(struct aa_label *label, int family, int type,
-			int protocol);
-int aa_sock_bind_perm(struct socket *sock, struct sockaddr *address,
-		      int addrlen);
-int aa_sock_connect_perm(struct socket *sock, struct sockaddr *address,
-			 int addrlen);
-int aa_sock_listen_perm(struct socket *sock, int backlog);
-int aa_sock_accept_perm(struct socket *sock, struct socket *newsock);
-int aa_sock_msg_perm(const char *op, u32 request, struct socket *sock,
-		     struct msghdr *msg, int size);
-int aa_sock_opt_perm(const char *op, u32 request, struct socket *sock, int level,
-		     int optname);
 int aa_sock_file_perm(struct aa_label *label, const char *op, u32 request,
 		      struct socket *sock);
 
-
-static inline void aa_free_net_rules(struct aa_net *new)
-{
-	/* NOP */
-}
+int apparmor_secmark_check(struct aa_label *label, char *op, u32 request,
+			   u32 secid, const struct sock *sk);
 
 #endif /* __AA_NET_H */

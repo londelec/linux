@@ -1,15 +1,11 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * AppArmor security module
  *
  * This file contains AppArmor policy definitions.
  *
  * Copyright (C) 1998-2008 Novell/SUSE
- * Copyright 2009-2015 Canonical Ltd.
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License as
- * published by the Free Software Foundation, version 2 of the
- * License.
+ * Copyright 2009-2017 Canonical Ltd.
  */
 
 #ifndef __AA_NAMESPACE_H
@@ -45,6 +41,7 @@ struct aa_ns_acct {
  * @sub_ns: list of namespaces under the current namespace.
  * @uniq_null: uniq value used for null learning profiles
  * @uniq_id: a unique id count for the profiles in the namespace
+ * @level: level of ns within the tree hierarchy
  * @dents: dentries for the namespaces file entries in apparmorfs
  *
  * An aa_ns defines the set profiles that are searched to determine which
@@ -68,11 +65,16 @@ struct aa_ns {
 	atomic_t uniq_null;
 	long uniq_id;
 	int level;
+	long revision;
+	wait_queue_head_t wait;
+
 	struct aa_labelset labels;
+	struct list_head rawdata_list;
 
 	struct dentry *dents[AAFS_NS_SIZEOF];
 };
 
+extern struct aa_label *kernel_t;
 extern struct aa_ns *root_ns;
 
 extern const char *aa_hidden_ns_name;
@@ -88,8 +90,10 @@ void aa_free_ns_kref(struct kref *kref);
 
 struct aa_ns *aa_find_ns(struct aa_ns *root, const char *name);
 struct aa_ns *aa_findn_ns(struct aa_ns *root, const char *name, size_t n);
-struct aa_ns *aa_create_ns(struct aa_ns *parent, const char *name,
-			   struct dentry *dir);
+struct aa_ns *__aa_lookupn_ns(struct aa_ns *view, const char *hname, size_t n);
+struct aa_ns *aa_lookupn_ns(struct aa_ns *view, const char *name, size_t n);
+struct aa_ns *__aa_find_or_create_ns(struct aa_ns *parent, const char *name,
+				     struct dentry *dir);
 struct aa_ns *aa_prepare_ns(struct aa_ns *root, const char *name);
 void __aa_remove_ns(struct aa_ns *ns);
 
@@ -116,7 +120,7 @@ static inline struct aa_ns *aa_get_ns(struct aa_ns *ns)
 
 /**
  * aa_put_ns - decrement refcount on @ns
- * @ns: ns to put reference of
+ * @ns: namespace to put reference of
  *
  * Decrement reference count of @ns and if no longer in use free it
  */
@@ -145,6 +149,17 @@ static inline struct aa_ns *__aa_find_ns(struct list_head *head,
 					 const char *name)
 {
 	return __aa_findn_ns(head, name, strlen(name));
+}
+
+static inline struct aa_ns *__aa_lookup_ns(struct aa_ns *base,
+					   const char *hname)
+{
+	return __aa_lookupn_ns(base, hname, strlen(hname));
+}
+
+static inline struct aa_ns *aa_lookup_ns(struct aa_ns *view, const char *name)
+{
+	return aa_lookupn_ns(view, name, strlen(name));
 }
 
 #endif /* AA_NAMESPACE_H */
