@@ -10,5 +10,5 @@ parts:
   kernel:
     plugin: kernel
     source: SRCTREE
-    source-type: git
-    kconfigfile: SRCTREE/.config
+    source-type: tar
+    kernel-with-firmware: false

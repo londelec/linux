@@ -1,11 +1,14 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _NET_IPCOMP_H
 #define _NET_IPCOMP_H
 
+#include <linux/skbuff.h>
 #include <linux/types.h>
 
 #define IPCOMP_SCRATCH_SIZE     65400
 
 struct crypto_comp;
+struct ip_comp_hdr;
 
 struct ipcomp_data {
 	u16 threshold;

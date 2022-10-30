@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _NET_DST_OPS_H
 #define _NET_DST_OPS_H
 #include <linux/types.h>
@@ -26,7 +27,8 @@ struct dst_ops {
 	struct dst_entry *	(*negative_advice)(struct dst_entry *);
 	void			(*link_failure)(struct sk_buff *);
 	void			(*update_pmtu)(struct dst_entry *dst, struct sock *sk,
-					       struct sk_buff *skb, u32 mtu);
+					       struct sk_buff *skb, u32 mtu,
+					       bool confirm_neigh);
 	void			(*redirect)(struct dst_entry *dst, struct sock *sk,
 					    struct sk_buff *skb);
 	int			(*local_out)(struct net *net, struct sock *sk, struct sk_buff *skb);
@@ -48,19 +50,14 @@ static inline int dst_entries_get_fast(struct dst_ops *dst)
 
 static inline int dst_entries_get_slow(struct dst_ops *dst)
 {
-	int res;
-
-	local_bh_disable();
-	res = percpu_counter_sum_positive(&dst->pcpuc_entries);
-	local_bh_enable();
-	return res;
+	return percpu_counter_sum_positive(&dst->pcpuc_entries);
 }
 
+#define DST_PERCPU_COUNTER_BATCH 32
 static inline void dst_entries_add(struct dst_ops *dst, int val)
 {
-	local_bh_disable();
-	percpu_counter_add(&dst->pcpuc_entries, val);
-	local_bh_enable();
+	percpu_counter_add_batch(&dst->pcpuc_entries, val,
+				 DST_PERCPU_COUNTER_BATCH);
 }
 
 static inline int dst_entries_init(struct dst_ops *dst)

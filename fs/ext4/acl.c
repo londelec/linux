@@ -1,9 +1,11 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * linux/fs/ext4/acl.c
  *
  * Copyright (C) 2001-2003 Andreas Gruenbacher, <agruen@suse.de>
  */
 
+#include <linux/quotaops.h>
 #include "ext4_jbd2.h"
 #include "ext4.h"
 #include "xattr.h"
@@ -13,7 +15,7 @@
  * Convert from filesystem to in-memory representation.
  */
 static struct posix_acl *
-ext4_acl_from_disk(struct super_block *sb, const void *value, size_t size)
+ext4_acl_from_disk(const void *value, size_t size)
 {
 	const char *end = (char *)value + size;
 	int n, count;
@@ -57,20 +59,16 @@ ext4_acl_from_disk(struct super_block *sb, const void *value, size_t size)
 			if ((char *)value > end)
 				goto fail;
 			acl->a_entries[n].e_uid =
-				make_kuid(sb->s_user_ns,
+				make_kuid(&init_user_ns,
 					  le32_to_cpu(entry->e_id));
-			if (!uid_valid(acl->a_entries[n].e_uid))
-				goto fail;
 			break;
 		case ACL_GROUP:
 			value = (char *)value + sizeof(ext4_acl_entry);
 			if ((char *)value > end)
 				goto fail;
 			acl->a_entries[n].e_gid =
-				make_kgid(sb->s_user_ns,
+				make_kgid(&init_user_ns,
 					  le32_to_cpu(entry->e_id));
-			if (!gid_valid(acl->a_entries[n].e_gid))
-				goto fail;
 			break;
 
 		default:
@@ -90,14 +88,11 @@ fail:
  * Convert from in-memory to filesystem representation.
  */
 static void *
-ext4_acl_to_disk(struct super_block *sb, const struct posix_acl *acl,
-		 size_t *size)
+ext4_acl_to_disk(const struct posix_acl *acl, size_t *size)
 {
 	ext4_acl_header *ext_acl;
 	char *e;
 	size_t n;
-	uid_t uid;
-	gid_t gid;
 
 	*size = ext4_acl_size(acl->a_count);
 	ext_acl = kmalloc(sizeof(ext4_acl_header) + acl->a_count *
@@ -113,17 +108,13 @@ ext4_acl_to_disk(struct super_block *sb, const struct posix_acl *acl,
 		entry->e_perm = cpu_to_le16(acl_e->e_perm);
 		switch (acl_e->e_tag) {
 		case ACL_USER:
-			uid = from_kuid(sb->s_user_ns, acl_e->e_uid);
-			if (uid == (uid_t)-1)
-				goto fail;
-			entry->e_id = cpu_to_le32(uid);
+			entry->e_id = cpu_to_le32(
+				from_kuid(&init_user_ns, acl_e->e_uid));
 			e += sizeof(ext4_acl_entry);
 			break;
 		case ACL_GROUP:
-			gid = from_kgid(sb->s_user_ns, acl_e->e_gid);
-			if (gid == (gid_t)-1)
-				goto fail;
-			entry->e_id = cpu_to_le32(gid);
+			entry->e_id = cpu_to_le32(
+				from_kgid(&init_user_ns, acl_e->e_gid));
 			e += sizeof(ext4_acl_entry);
 			break;
 
@@ -148,15 +139,18 @@ fail:
 /*
  * Inode operation get_posix_acl().
  *
- * inode->i_mutex: don't care
+ * inode->i_rwsem: don't care
  */
 struct posix_acl *
-ext4_get_acl(struct inode *inode, int type)
+ext4_get_acl(struct inode *inode, int type, bool rcu)
 {
 	int name_index;
 	char *value = NULL;
 	struct posix_acl *acl;
 	int retval;
+
+	if (rcu)
+		return ERR_PTR(-ECHILD);
 
 	switch (type) {
 	case ACL_TYPE_ACCESS:
@@ -176,15 +170,12 @@ ext4_get_acl(struct inode *inode, int type)
 		retval = ext4_xattr_get(inode, name_index, "", value, retval);
 	}
 	if (retval > 0)
-		acl = ext4_acl_from_disk(inode->i_sb, value, retval);
+		acl = ext4_acl_from_disk(value, retval);
 	else if (retval == -ENODATA || retval == -ENOSYS)
 		acl = NULL;
 	else
 		acl = ERR_PTR(retval);
 	kfree(value);
-
-	if (!IS_ERR(acl))
-		set_cached_acl(inode, type, acl);
 
 	return acl;
 }
@@ -192,11 +183,11 @@ ext4_get_acl(struct inode *inode, int type)
 /*
  * Set the access or default ACL of an inode.
  *
- * inode->i_mutex: down unless called from ext4_new_inode
+ * inode->i_rwsem: down unless called from ext4_new_inode
  */
 static int
 __ext4_set_acl(handle_t *handle, struct inode *inode, int type,
-	     struct posix_acl *acl)
+	     struct posix_acl *acl, int xattr_flags)
 {
 	int name_index;
 	void *value = NULL;
@@ -218,13 +209,13 @@ __ext4_set_acl(handle_t *handle, struct inode *inode, int type,
 		return -EINVAL;
 	}
 	if (acl) {
-		value = ext4_acl_to_disk(inode->i_sb, acl, &size);
+		value = ext4_acl_to_disk(acl, &size);
 		if (IS_ERR(value))
 			return (int)PTR_ERR(value);
 	}
 
 	error = ext4_xattr_set_handle(handle, inode, name_index, "",
-				      value, size, 0);
+				      value, size, xattr_flags);
 
 	kfree(value);
 	if (!error)
@@ -234,31 +225,41 @@ __ext4_set_acl(handle_t *handle, struct inode *inode, int type,
 }
 
 int
-ext4_set_acl(struct inode *inode, struct posix_acl *acl, int type)
+ext4_set_acl(struct user_namespace *mnt_userns, struct inode *inode,
+	     struct posix_acl *acl, int type)
 {
 	handle_t *handle;
-	int error, retries = 0;
+	int error, credits, retries = 0;
+	size_t acl_size = acl ? ext4_acl_size(acl->a_count) : 0;
 	umode_t mode = inode->i_mode;
 	int update_mode = 0;
 
+	error = dquot_initialize(inode);
+	if (error)
+		return error;
 retry:
-	handle = ext4_journal_start(inode, EXT4_HT_XATTR,
-				    ext4_jbd2_credits_xattr(inode));
+	error = ext4_xattr_set_credits(inode, acl_size, false /* is_create */,
+				       &credits);
+	if (error)
+		return error;
+
+	handle = ext4_journal_start(inode, EXT4_HT_XATTR, credits);
 	if (IS_ERR(handle))
 		return PTR_ERR(handle);
 
 	if ((type == ACL_TYPE_ACCESS) && acl) {
-		error = posix_acl_update_mode(inode, &mode, &acl);
+		error = posix_acl_update_mode(mnt_userns, inode, &mode, &acl);
 		if (error)
 			goto out_stop;
-		update_mode = 1;
+		if (mode != inode->i_mode)
+			update_mode = 1;
 	}
 
-	error = __ext4_set_acl(handle, inode, type, acl);
+	error = __ext4_set_acl(handle, inode, type, acl, 0 /* xattr_flags */);
 	if (!error && update_mode) {
 		inode->i_mode = mode;
-		inode->i_ctime = ext4_current_time(inode);
-		ext4_mark_inode_dirty(handle, inode);
+		inode->i_ctime = current_time(inode);
+		error = ext4_mark_inode_dirty(handle, inode);
 	}
 out_stop:
 	ext4_journal_stop(handle);
@@ -270,8 +271,8 @@ out_stop:
 /*
  * Initialize the ACLs of a new inode. Called from ext4_new_inode.
  *
- * dir->i_mutex: down
- * inode->i_mutex: up (access to inode is still exclusive)
+ * dir->i_rwsem: down
+ * inode->i_rwsem: up (access to inode is still exclusive)
  */
 int
 ext4_init_acl(handle_t *handle, struct inode *inode, struct inode *dir)
@@ -285,14 +286,18 @@ ext4_init_acl(handle_t *handle, struct inode *inode, struct inode *dir)
 
 	if (default_acl) {
 		error = __ext4_set_acl(handle, inode, ACL_TYPE_DEFAULT,
-				       default_acl);
+				       default_acl, XATTR_CREATE);
 		posix_acl_release(default_acl);
+	} else {
+		inode->i_default_acl = NULL;
 	}
 	if (acl) {
 		if (!error)
 			error = __ext4_set_acl(handle, inode, ACL_TYPE_ACCESS,
-					       acl);
+					       acl, XATTR_CREATE);
 		posix_acl_release(acl);
+	} else {
+		inode->i_acl = NULL;
 	}
 	return error;
 }

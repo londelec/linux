@@ -126,7 +126,7 @@ static const struct i2c_algorithm octeon_i2c_algo = {
 	.functionality = octeon_i2c_functionality,
 };
 
-static struct i2c_adapter octeon_i2c_ops = {
+static const struct i2c_adapter octeon_i2c_ops = {
 	.owner = THIS_MODULE,
 	.name = "OCTEON adapter",
 	.algo = &octeon_i2c_algo,
@@ -136,7 +136,6 @@ static int octeon_i2c_probe(struct platform_device *pdev)
 {
 	struct device_node *node = pdev->dev.of_node;
 	int irq, result = 0, hlc_irq = 0;
-	struct resource *res_mem;
 	struct octeon_i2c *i2c;
 	bool cn78xx_style;
 
@@ -167,8 +166,7 @@ static int octeon_i2c_probe(struct platform_device *pdev)
 	i2c->roff.twsi_int = 0x10;
 	i2c->roff.sw_twsi_ext = 0x18;
 
-	res_mem = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	i2c->twsi_base = devm_ioremap_resource(&pdev->dev, res_mem);
+	i2c->twsi_base = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(i2c->twsi_base)) {
 		result = PTR_ERR(i2c->twsi_base);
 		goto out;
@@ -246,10 +244,8 @@ static int octeon_i2c_probe(struct platform_device *pdev)
 	platform_set_drvdata(pdev, i2c);
 
 	result = i2c_add_adapter(&i2c->adap);
-	if (result < 0) {
-		dev_err(i2c->dev, "failed to add adapter\n");
+	if (result < 0)
 		goto out;
-	}
 	dev_info(i2c->dev, "probed\n");
 	return 0;
 

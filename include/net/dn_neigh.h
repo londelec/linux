@@ -1,5 +1,8 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _NET_DN_NEIGH_H
 #define _NET_DN_NEIGH_H
+
+#include <net/neighbour.h>
 
 /*
  * The position of the first two fields of

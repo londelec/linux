@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * AppArmor security module
  *
@@ -5,16 +6,12 @@
  *
  * Copyright (C) 1998-2008 Novell/SUSE
  * Copyright 2009-2010 Canonical Ltd.
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License as
- * published by the Free Software Foundation, version 2 of the
- * License.
  */
 
 #include "include/apparmor.h"
-#include "include/context.h"
+#include "include/cred.h"
 #include "include/policy.h"
+#include "include/policy_ns.h"
 #include "include/domain.h"
 #include "include/procattr.h"
 
@@ -23,8 +20,6 @@
  * aa_getprocattr - Return the profile information for @profile
  * @profile: the profile to print profile info about  (NOT NULL)
  * @string: Returns - string containing the profile info (NOT NULL)
- *
- * Returns: length of @string on success else error on failure
  *
  * Requires: profile != NULL
  *
@@ -78,7 +73,7 @@ int aa_getprocattr(struct aa_label *label, char **string)
  *
  * Returns: start position of name after token else NULL on failure
  */
-static char *split_token_from_name(const char *op, char *args, u64 * token)
+static char *split_token_from_name(const char *op, char *args, u64 *token)
 {
 	char *name;
 
@@ -95,14 +90,14 @@ static char *split_token_from_name(const char *op, char *args, u64 * token)
 }
 
 /**
- * aa_setprocattr_chagnehat - handle procattr interface to change_hat
+ * aa_setprocattr_changehat - handle procattr interface to change_hat
  * @args: args received from writing to /proc/<pid>/attr/current (NOT NULL)
  * @size: size of the args
- * @test: true if this is a test of change_hat permissions
+ * @flags: set of flags governing behavior
  *
  * Returns: %0 or error code if change_hat fails
  */
-int aa_setprocattr_changehat(char *args, size_t size, int test)
+int aa_setprocattr_changehat(char *args, size_t size, int flags)
 {
 	char *hat;
 	u64 token;
@@ -137,5 +132,5 @@ int aa_setprocattr_changehat(char *args, size_t size, int test)
 		AA_DEBUG("%s: (pid %d) Magic 0x%llx count %d Hat '%s'\n",
 			 __func__, current->pid, token, count, "<NULL>");
 
-	return aa_change_hat(hats, count, token, test);
+	return aa_change_hat(hats, count, token, flags);
 }
