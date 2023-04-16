@@ -348,6 +348,17 @@
 
 /* End of Alphascale asm9260 defines */
 
+#define MXS_USER_GPIO_RS485_RTS
+#ifdef MXS_USER_GPIO_RS485_RTS
+#define MXS_AUART_RS485_RTS_GPIO		addr_recv
+#define MXS_AUART_RS485_RTS_ACT		(1 << 31)
+static const struct serial_rs485 mxs_rs485_supported = {
+	.flags = SER_RS485_ENABLED |
+		SER_RS485_RTS_ON_SEND | SER_RS485_RTS_AFTER_SEND |
+		SER_RS485_ADDRB | SER_RS485_ADDR_RECV,
+};
+#endif
+
 static struct uart_driver auart_driver;
 
 enum mxs_auart_type {
@@ -439,6 +450,10 @@ struct mxs_auart_port {
 	struct mctrl_gpios	*gpios;
 	int			gpio_irq[UART_GPIO_MAX];
 	bool			ms_irq_enabled;
+
+#ifdef MXS_USER_GPIO_RS485_RTS
+	struct gpio_desc	*rs485_desc;
+#endif
 };
 
 static const struct of_device_id mxs_auart_dt_ids[] = {
@@ -1092,6 +1107,56 @@ static void mxs_auart_set_ldisc(struct uart_port *port,
 	}
 }
 
+#ifdef MXS_USER_GPIO_RS485_RTS
+static void mxs_user_rs485_change(struct mxs_auart_port *s, int value)
+{
+	if (s->rs485_desc)
+		gpiod_set_raw_value(s->rs485_desc, value);
+}
+
+static void mxs_user_rs485_isr(struct mxs_auart_port *s, u32 istat)
+{
+	u32 stat;
+	u32	ctrl0;
+	u8 c;
+
+	/*
+	 * Discard all echoed data
+	 */
+	while (1) {
+		stat = mxs_read(s, REG_STAT);
+		if (stat & AUART_STAT_RXFE)
+			break;
+		c = mxs_read(s, REG_DATA);
+	}
+
+	mxs_write(0, s, REG_STAT);
+
+	/*
+	 * Unlikely, but just in case RX FIFO interrupt occurs
+	 * before RX timeout interrupt.
+	 * Used to be:
+	 *	if (istat & AUART_INTR_RTIS)
+	 *		return;
+	 */
+	if (
+			(istat & AUART_INTR_RXIS) &&
+			((stat & (AUART_STAT_TXFE | AUART_STAT_BUSY)) != AUART_STAT_TXFE))
+		return;
+
+	s->port.rs485.flags &= ~MXS_AUART_RS485_RTS_ACT;
+	mxs_user_rs485_change(s, s->port.rs485.flags & SER_RS485_RTS_AFTER_SEND);
+
+	/*
+	 * Restore default Rx timeout (3*8 + 7 = 31bits)
+	 */
+	ctrl0 = mxs_read(s, REG_CTRL0);
+	ctrl0 &= ~AUART_CTRL0_RXTIMEOUT(0x7ff);
+	ctrl0 |= AUART_CTRL0_RXTIMEOUT(3);
+	mxs_write(ctrl0, s, REG_CTRL0);
+}
+#endif
+
 static irqreturn_t mxs_auart_irq_handle(int irq, void *context)
 {
 	u32 istat;
@@ -1124,8 +1189,16 @@ static irqreturn_t mxs_auart_irq_handle(int irq, void *context)
 	}
 
 	if (istat & (AUART_INTR_RTIS | AUART_INTR_RXIS)) {
-		if (!auart_dma_enabled(s))
-			mxs_auart_rx_chars(s);
+#ifdef MXS_USER_GPIO_RS485_RTS
+		if (s->port.rs485.flags & MXS_AUART_RS485_RTS_ACT) {
+			 mxs_user_rs485_isr(s, istat);
+		} else {
+#endif
+			if (!auart_dma_enabled(s))
+				mxs_auart_rx_chars(s);
+#ifdef MXS_USER_GPIO_RS485_RTS
+		}
+#endif
 		istat &= ~(AUART_INTR_RTIS | AUART_INTR_RXIS);
 	}
 
@@ -1211,6 +1284,11 @@ static int mxs_auart_startup(struct uart_port *u)
 	/* get initial status of modem lines */
 	mctrl_gpio_get(s->gpios, &s->mctrl_prev);
 
+#ifdef MXS_USER_GPIO_RS485_RTS
+	/* Deactivate RS485 RTS on startup */
+	s->port.rs485.flags &= ~MXS_AUART_RS485_RTS_ACT;
+#endif
+
 	s->ms_irq_enabled = false;
 	return 0;
 }
@@ -1228,11 +1306,20 @@ static void mxs_auart_shutdown(struct uart_port *u)
 		mxs_clr(AUART_CTRL2_UARTEN, s, REG_CTRL2);
 
 		mxs_clr(AUART_INTR_RXIEN | AUART_INTR_RTIEN |
-			AUART_INTR_CTSMIEN, s, REG_INTR);
+			AUART_INTR_TXIEN | AUART_INTR_CTSMIEN, s, REG_INTR);
 		mxs_set(AUART_CTRL0_CLKGATE, s, REG_CTRL0);
 	} else {
 		mxs_auart_reset_assert(s);
 	}
+
+#ifdef MXS_USER_GPIO_RS485_RTS
+	/* Deactivate and Disable RS485 RTS on shutdown */
+	if (s->port.rs485.flags & MXS_AUART_RS485_RTS_ACT)
+		mxs_user_rs485_change(s, s->port.rs485.flags & SER_RS485_RTS_AFTER_SEND);
+
+	s->port.rs485.flags &= ~(SER_RS485_ENABLED | MXS_AUART_RS485_RTS_ACT);
+	s->rs485_desc = NULL;
+#endif
 
 	clk_disable_unprepare(s->clk);
 }
@@ -1255,6 +1342,25 @@ static void mxs_auart_start_tx(struct uart_port *u)
 	/* enable transmitter */
 	mxs_set(AUART_CTRL2_TXE, s, REG_CTRL2);
 
+#ifdef MXS_USER_GPIO_RS485_RTS
+	if (
+			(u->rs485.flags & SER_RS485_ENABLED) &&
+			(s->rs485_desc)) {
+		u32	ctrl0;
+		u->rs485.flags |= MXS_AUART_RS485_RTS_ACT;
+
+		mxs_user_rs485_change(s, s->port.rs485.flags & SER_RS485_RTS_ON_SEND);
+
+		/*
+		 * Timeout is set to 8*1 + 7 = 15bits
+		 */
+		ctrl0 = mxs_read(s, REG_CTRL0);
+		ctrl0 &= ~AUART_CTRL0_RXTIMEOUT(0x7ff);
+		ctrl0 |= AUART_CTRL0_RXTIMEOUT(1);
+		mxs_write(ctrl0, s, REG_CTRL0);
+	}
+#endif
+
 	mxs_auart_tx_chars(s);
 }
 
@@ -1263,6 +1369,14 @@ static void mxs_auart_stop_tx(struct uart_port *u)
 	struct mxs_auart_port *s = to_auart_port(u);
 
 	mxs_clr(AUART_CTRL2_TXE, s, REG_CTRL2);
+
+#ifdef MXS_USER_GPIO_RS485_RTS
+	/* Deactivate RS485 RTS on stop tx */
+	if (s->port.rs485.flags & MXS_AUART_RS485_RTS_ACT)
+		mxs_user_rs485_change(s, s->port.rs485.flags & SER_RS485_RTS_AFTER_SEND);
+
+	s->port.rs485.flags &= ~MXS_AUART_RS485_RTS_ACT;
+#endif
 }
 
 static void mxs_auart_stop_rx(struct uart_port *u)
@@ -1543,6 +1657,35 @@ static int mxs_auart_init_gpios(struct mxs_auart_port *s, struct device *dev)
 	return 0;
 }
 
+#ifdef MXS_USER_GPIO_RS485_RTS
+static int mxs_uart_rs485_config(struct uart_port *port, struct ktermios *termios,
+				 struct serial_rs485 *rs485)
+{
+	struct mxs_auart_port *s = to_auart_port(port);
+
+
+	if (rs485->flags & SER_RS485_ENABLED) {
+		/*
+		 * ->addr_recv (previously ->padding[0]) is used as a gpio number of the RS485 RTS
+		 */
+		dev_dbg(s->dev, "RS485 port=%u flags=0x%x addr_recv=%u\n", port->line, rs485->flags, rs485->MXS_AUART_RS485_RTS_GPIO);
+
+		if (!(rs485->MXS_AUART_RS485_RTS_GPIO) || (rs485->MXS_AUART_RS485_RTS_GPIO >= 148))
+			return -EINVAL;
+
+		s->rs485_desc = gpio_to_desc(rs485->MXS_AUART_RS485_RTS_GPIO);
+		if (!s->rs485_desc)
+			return -EINVAL;
+
+		/*
+		 * Note, user space values are copied to rs485 structure in caller
+		 * serial_core.c after this function returns.
+		 */
+	}
+	return 0;
+}
+#endif
+
 static void mxs_auart_free_gpio_irq(struct mxs_auart_port *s)
 {
 	enum mctrl_gpio_idx i;
@@ -1636,6 +1779,13 @@ static int mxs_auart_probe(struct platform_device *pdev)
 	s->port.uartclk = clk_get_rate(s->clk);
 	s->port.type = PORT_IMX;
 	s->port.has_sysrq = IS_ENABLED(CONFIG_SERIAL_MXS_AUART_CONSOLE);
+
+#ifdef MXS_USER_GPIO_RS485_RTS
+	if ((s->port.line >= 0) && (s->port.line <= 2)) {
+		s->port.rs485_supported = mxs_rs485_supported;
+		s->port.rs485_config = mxs_uart_rs485_config;
+	}
+#endif
 
 	mxs_init_regs(s);
 
