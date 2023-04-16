@@ -21,6 +21,8 @@
 #include <linux/phy.h>
 #include <linux/netdevice.h>
 #include <linux/smscphy.h>
+#include <linux/debugfs.h>
+
 
 /* Vendor-specific PHY Definitions */
 /* EDPD NLP / crossover time configuration */
@@ -48,6 +50,67 @@ struct smsc_phy_priv {
 	bool energy_enable;
 	struct clk *refclk;
 };
+
+#if CONFIG_DEBUG_FS
+static int smsc_regs_show(struct seq_file *s, void *what)
+{
+	struct phy_device *phydev = s->private;
+	unsigned int i, rdata;
+
+	seq_printf(s, "BASE registers:\n");
+
+	mutex_lock(&phydev->lock);
+
+	for (i = 0; i < 32; i++) {
+		rdata = phy_read(phydev, i);
+
+		seq_printf(s, "[%02x]=0x%04x\n", i, rdata);
+	}
+
+	mutex_unlock(&phydev->lock);
+
+	return 0;
+}
+DEFINE_SHOW_ATTRIBUTE(smsc_regs);
+
+static void smsc_init_device_debugfs(struct phy_device *phydev)
+{
+	struct dentry *class_root, *device_root, *regent;
+	char debugfs_name[32];
+
+	class_root = debugfs_lookup("phy", NULL);
+	if (!class_root) {
+		class_root = debugfs_create_dir("phy", NULL);
+	}
+
+	if (IS_ERR(class_root) || !class_root) {
+		pr_warn("failed to create debugfs directory phy\n");
+		return;
+	}
+
+	sprintf(debugfs_name, "%02x", phydev->mdio.addr);
+	strcat(debugfs_name, ".smsc");
+
+	device_root = debugfs_create_dir(debugfs_name, class_root);
+
+	if (IS_ERR(device_root) || !device_root) {
+		pr_warn("failed to create debugfs directory for %s\n",
+				debugfs_name);
+		return;
+	}
+
+	regent = debugfs_create_file("baseregs", 0444,
+			    device_root, phydev, &smsc_regs_fops);
+}
+
+#else /* CONFIG_DEBUG_FS */
+
+static void smsc_init_device_debugfs(struct phy_device *phydev)
+{
+}
+
+#endif /* CONFIG_DEBUG_FS */
+
 
 static int smsc_phy_ack_interrupt(struct phy_device *phydev)
 {
@@ -326,6 +389,8 @@ static int smsc_phy_probe(struct phy_device *phydev)
 		clk_disable_unprepare(priv->refclk);
 		return ret;
 	}
+
+	smsc_init_device_debugfs(phydev);
 
 	return 0;
 }
