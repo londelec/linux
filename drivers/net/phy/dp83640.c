@@ -16,6 +16,7 @@
 #include <linux/net_tstamp.h>
 #include <linux/netdevice.h>
 #include <linux/if_vlan.h>
+#include <linux/of.h>
 #include <linux/phy.h>
 #include <linux/ptp_classify.h>
 #include <linux/ptp_clock_kernel.h>
@@ -63,6 +64,18 @@
 #define ADJTIME_FIX	16
 
 #define SKB_TIMESTAMP_TIMEOUT	2 /* jiffies */
+
+#define DP83640_FLAG_BROADCAST	(1<<0)
+
+#define LE_CUSTOM_MDIO
+#define LE_NO_DEFAULT_PINS
+#define LE_OVERRIDE_LINK_CHANGE
+#define LE_OWN_CLOCK
+#if CONFIG_DEBUG_FS
+#include <linux/debugfs.h>
+#include <linux/seq_file.h>
+#endif
+
 
 #if defined(__BIG_ENDIAN)
 #define ENDIAN_FLAG	0
@@ -125,6 +138,13 @@ struct dp83640_private {
 	/* queues of incoming and outgoing packets */
 	struct sk_buff_head rx_queue;
 	struct sk_buff_head tx_queue;
+#ifdef LE_CUSTOM_MDIO
+	/* Bit field for DP83640_FLAG_ flags */
+	unsigned int flags;
+#endif
+#ifdef LE_OVERRIDE_LINK_CHANGE
+	void (*phy_link_change)(struct phy_device *phydev, bool up);
+#endif
 };
 
 struct dp83640_clock {
@@ -132,8 +152,10 @@ struct dp83640_clock {
 	struct list_head list;
 	/* we create one clock instance per MII bus */
 	struct mii_bus *bus;
+#ifndef LE_CUSTOM_MDIO
 	/* protects extended registers from concurrent access */
 	struct mutex extreg_lock;
+#endif
 	/* remembers which page was last selected */
 	int page;
 	/* our advertised capabilities */
@@ -162,7 +184,10 @@ enum {
 	GPIO_TABLE_SIZE
 };
 
+#ifndef LE_OWN_CLOCK
 static int chosen_phy = -1;
+#endif
+#ifndef LE_NO_DEFAULT_PINS
 static ushort gpio_tab[GPIO_TABLE_SIZE] = {
 	1, 2, 3, 4, 8, 9, 10, 11
 };
@@ -174,16 +199,25 @@ MODULE_PARM_DESC(chosen_phy,
 	"The address of the PHY to use for the ancillary clock features");
 MODULE_PARM_DESC(gpio_tab,
 	"Which GPIO line to use for which purpose: cal,perout,extts1,...,extts6");
+#endif /* LE_NO_DEFAULT_PINS */
 
 static void dp83640_gpio_defaults(struct ptp_pin_desc *pd)
 {
-	int i, index;
+	int i;
+#ifndef LE_NO_DEFAULT_PINS
+	int index;
+#endif
 
 	for (i = 0; i < DP83640_N_PINS; i++) {
 		snprintf(pd[i].name, sizeof(pd[i].name), "GPIO%d", 1 + i);
 		pd[i].index = i;
+
+#ifdef LE_NO_DEFAULT_PINS
+		pd[i].func = PTP_PF_NONE;
+#endif
 	}
 
+#ifndef LE_NO_DEFAULT_PINS
 	for (i = 0; i < GPIO_TABLE_SIZE; i++) {
 		if (gpio_tab[i] < 1 || gpio_tab[i] > DP83640_N_PINS) {
 			pr_err("gpio_tab[%d]=%hu out of range", i, gpio_tab[i]);
@@ -204,6 +238,7 @@ static void dp83640_gpio_defaults(struct ptp_pin_desc *pd)
 		pd[index].func = PTP_PF_EXTTS;
 		pd[index].chan = i - EXTTS0_GPIO;
 	}
+#endif /* LE_NO_DEFAULT_PINS */
 }
 
 /* a list of clocks and a mutex to protect it */
@@ -216,6 +251,87 @@ static void rx_timestamp_work(struct work_struct *work);
 
 #define BROADCAST_ADDR 31
 
+#ifdef LE_CUSTOM_MDIO
+static inline int broadcast_write(struct phy_device *phydev, u32 regnum,
+				  u16 val)
+{
+	return __mdiobus_write(phydev->mdio.bus, BROADCAST_ADDR, regnum, val);
+}
+
+/* Caller must hold mdio_lock. */
+static int ext_read(struct phy_device *phydev, int page, u32 regnum)
+{
+	int val;
+
+	val = __phy_write(phydev, PAGESEL, page);
+	if (val < 0)
+		return val;
+
+	return __phy_read(phydev, regnum);
+}
+
+/* Caller must hold mdio_lock. */
+static int ext_write(int broadcast, struct phy_device *phydev,
+		      u32 regnum, u16 val)
+{
+	struct dp83640_private *dp83640 = phydev->priv;
+
+	if (broadcast && (dp83640->flags & DP83640_FLAG_BROADCAST))
+		return broadcast_write(phydev, regnum, val);
+	else
+		return __phy_write(phydev, regnum, val);
+}
+
+/* Caller must hold mdio_lock. */
+static int ext_page_write(int broadcast, struct phy_device *phydev,
+		      int page, u32 regnum, u16 val)
+{
+	struct dp83640_private *dp83640 = phydev->priv;
+	int ret;
+
+	if (broadcast && (dp83640->flags & DP83640_FLAG_BROADCAST))
+		ret = broadcast_write(phydev, PAGESEL, page);
+	else
+		ret = __phy_write(phydev, PAGESEL, page);
+
+	if (ret < 0)
+		return ret;
+
+	if (broadcast && (dp83640->flags & DP83640_FLAG_BROADCAST))
+		return broadcast_write(phydev, regnum, val);
+	else
+		return __phy_write(phydev, regnum, val);
+}
+
+/* Caller must hold mdio_lock. */
+static int tdr_write(int bc, struct phy_device *dev,
+		const struct timespec64 *ts, u16 cmd)
+{
+	int ret;
+	ret = ext_write(bc, dev, PAGESEL, PAGE4);
+	if (ret)
+		return ret;
+
+	ret = ext_write(bc, dev, PTP_TDR, ts->tv_nsec & 0xffff);/* ns[15:0]  */
+	if (ret)
+		return ret;
+
+	ret = ext_write(bc, dev, PTP_TDR, ts->tv_nsec >> 16);   /* ns[31:16] */
+	if (ret)
+		return ret;
+
+	ret = ext_write(bc, dev, PTP_TDR, ts->tv_sec & 0xffff); /* sec[15:0] */
+	if (ret)
+		return ret;
+
+	ret = ext_write(bc, dev, PTP_TDR, ts->tv_sec >> 16);    /* sec[31:16]*/
+	if (ret)
+		return ret;
+
+	return ext_write(bc, dev, PTP_CTL, cmd);
+}
+
+#else
 static inline int broadcast_write(struct phy_device *phydev, u32 regnum,
 				  u16 val)
 {
@@ -266,6 +382,7 @@ static int tdr_write(int bc, struct phy_device *dev,
 
 	return 0;
 }
+#endif /* LE_CUSTOM_MDIO */
 
 /* convert phy timestamps into driver timestamps */
 
@@ -328,10 +445,17 @@ static int periodic_output(struct dp83640_clock *clock,
 
 	if (!on) {
 		val |= TRIG_DIS;
+#ifdef LE_CUSTOM_MDIO
+		phy_lock_mdio_bus(phydev);
+		ext_page_write(0, phydev, PAGE5, PTP_TRIG, ptp_trig);
+		ext_page_write(0, phydev, PAGE4, PTP_CTL, val);
+		phy_unlock_mdio_bus(phydev);
+#else
 		mutex_lock(&clock->extreg_lock);
 		ext_write(0, phydev, PAGE5, PTP_TRIG, ptp_trig);
 		ext_write(0, phydev, PAGE4, PTP_CTL, val);
 		mutex_unlock(&clock->extreg_lock);
+#endif
 		return 0;
 	}
 
@@ -341,12 +465,32 @@ static int periodic_output(struct dp83640_clock *clock,
 	pwidth += clkreq->perout.period.nsec;
 	pwidth /= 2;
 
+#ifdef LE_CUSTOM_MDIO
+	phy_lock_mdio_bus(phydev);
+
+	ext_page_write(0, phydev, PAGE5, PTP_TRIG, ptp_trig);
+#else
 	mutex_lock(&clock->extreg_lock);
 
 	ext_write(0, phydev, PAGE5, PTP_TRIG, ptp_trig);
+#endif
 
 	/*load trigger*/
 	val |= TRIG_LOAD;
+#ifdef LE_CUSTOM_MDIO
+	ext_page_write(0, phydev, PAGE4, PTP_CTL, val);
+	ext_write(0, phydev, PTP_TDR, nsec & 0xffff);   /* ns[15:0] */
+	ext_write(0, phydev, PTP_TDR, nsec >> 16);      /* ns[31:16] */
+	ext_write(0, phydev, PTP_TDR, sec & 0xffff);    /* sec[15:0] */
+	ext_write(0, phydev, PTP_TDR, sec >> 16);       /* sec[31:16] */
+	ext_write(0, phydev, PTP_TDR, pwidth & 0xffff); /* ns[15:0] */
+	ext_write(0, phydev, PTP_TDR, pwidth >> 16);    /* ns[31:16] */
+	/* Triggers 0 and 1 has programmable pulsewidth2 */
+	if (trigger < 2) {
+		ext_write(0, phydev, PTP_TDR, pwidth & 0xffff);
+		ext_write(0, phydev, PTP_TDR, pwidth >> 16);
+	}
+#else
 	ext_write(0, phydev, PAGE4, PTP_CTL, val);
 	ext_write(0, phydev, PAGE4, PTP_TDR, nsec & 0xffff);   /* ns[15:0] */
 	ext_write(0, phydev, PAGE4, PTP_TDR, nsec >> 16);      /* ns[31:16] */
@@ -359,13 +503,20 @@ static int periodic_output(struct dp83640_clock *clock,
 		ext_write(0, phydev, PAGE4, PTP_TDR, pwidth & 0xffff);
 		ext_write(0, phydev, PAGE4, PTP_TDR, pwidth >> 16);
 	}
+#endif
 
 	/*enable trigger*/
 	val &= ~TRIG_LOAD;
 	val |= TRIG_EN;
+#ifdef LE_CUSTOM_MDIO
+	ext_write(0, phydev, PTP_CTL, val);
+
+	phy_unlock_mdio_bus(phydev);
+#else
 	ext_write(0, phydev, PAGE4, PTP_CTL, val);
 
 	mutex_unlock(&clock->extreg_lock);
+#endif
 	return 0;
 }
 
@@ -394,12 +545,21 @@ static int ptp_dp83640_adjfine(struct ptp_clock_info *ptp, long scaled_ppm)
 
 	lo = rate & 0xffff;
 
+#ifdef LE_CUSTOM_MDIO
+	phy_lock_mdio_bus(phydev);
+
+	ext_page_write(1, phydev, PAGE4, PTP_RATEH, hi);
+	ext_write(1, phydev, PTP_RATEL, lo);
+
+	phy_unlock_mdio_bus(phydev);
+#else
 	mutex_lock(&clock->extreg_lock);
 
 	ext_write(1, phydev, PAGE4, PTP_RATEH, hi);
 	ext_write(1, phydev, PAGE4, PTP_RATEL, lo);
 
 	mutex_unlock(&clock->extreg_lock);
+#endif
 
 	return 0;
 }
@@ -416,11 +576,19 @@ static int ptp_dp83640_adjtime(struct ptp_clock_info *ptp, s64 delta)
 
 	ts = ns_to_timespec64(delta);
 
+#ifdef LE_CUSTOM_MDIO
+	phy_lock_mdio_bus(phydev);
+#else
 	mutex_lock(&clock->extreg_lock);
+#endif
 
 	err = tdr_write(1, phydev, &ts, PTP_STEP_CLK);
 
+#ifdef LE_CUSTOM_MDIO
+	phy_unlock_mdio_bus(phydev);
+#else
 	mutex_unlock(&clock->extreg_lock);
+#endif
 
 	return err;
 }
@@ -433,6 +601,18 @@ static int ptp_dp83640_gettime(struct ptp_clock_info *ptp,
 	struct phy_device *phydev = clock->chosen->phydev;
 	unsigned int val[4];
 
+#ifdef LE_CUSTOM_MDIO
+	phy_lock_mdio_bus(phydev);
+
+	ext_page_write(0, phydev, PAGE4, PTP_CTL, PTP_RD_CLK);
+
+	val[0] = __phy_read(phydev, PTP_TDR); /* ns[15:0] */
+	val[1] = __phy_read(phydev, PTP_TDR); /* ns[31:16] */
+	val[2] = __phy_read(phydev, PTP_TDR); /* sec[15:0] */
+	val[3] = __phy_read(phydev, PTP_TDR); /* sec[31:16] */
+
+	phy_unlock_mdio_bus(phydev);
+#else
 	mutex_lock(&clock->extreg_lock);
 
 	ext_write(0, phydev, PAGE4, PTP_CTL, PTP_RD_CLK);
@@ -443,6 +623,7 @@ static int ptp_dp83640_gettime(struct ptp_clock_info *ptp,
 	val[3] = ext_read(phydev, PAGE4, PTP_TDR); /* sec[31:16] */
 
 	mutex_unlock(&clock->extreg_lock);
+#endif
 
 	ts->tv_nsec = val[0] | (val[1] << 16);
 	ts->tv_sec  = val[2] | (val[3] << 16);
@@ -458,14 +639,147 @@ static int ptp_dp83640_settime(struct ptp_clock_info *ptp,
 	struct phy_device *phydev = clock->chosen->phydev;
 	int err;
 
+#ifdef LE_CUSTOM_MDIO
+	phy_lock_mdio_bus(phydev);
+#else
 	mutex_lock(&clock->extreg_lock);
+#endif
 
 	err = tdr_write(1, phydev, ts, PTP_LOAD_CLK);
 
+#ifdef LE_CUSTOM_MDIO
+	phy_unlock_mdio_bus(phydev);
+#else
 	mutex_unlock(&clock->extreg_lock);
+#endif
 
 	return err;
 }
+
+#if CONFIG_DEBUG_FS
+
+static int dp83640_ptptime_show(struct seq_file *s, void *what)
+{
+	struct dp83640_private *dp83640 = s->private;
+	struct dp83640_clock *clock = dp83640->clock;
+	struct timespec64 ts;
+
+	ptp_dp83640_gettime(&clock->caps, &ts);
+	seq_printf(s, "PTP time(s,ns)= %llu, %lu\n", ts.tv_sec, ts.tv_nsec);
+	return 0;
+}
+DEFINE_SHOW_ATTRIBUTE(dp83640_ptptime);
+
+static int dp83640_regs_show(struct seq_file *s, void *what)
+{
+	struct dp83640_private *dp83640 = s->private;
+	unsigned int i, rdata, page, first = 0, last;
+	const char *fname = s->file->f_path.dentry->d_name.name;
+	__kernel_size_t size;
+
+	phy_lock_mdio_bus(dp83640->phydev);
+
+	size = strlen(fname);
+	switch (size) {
+	case 5:	/* "pageX" */
+		page = fname[4] & 0x0F;
+		if (!strncmp("page", fname, 4) &&
+				(page >= 0) && (page <= 6)) {
+
+			seq_printf(s, "PAGE[%u] registers:\n", page);
+
+			if (page == 1) {
+				first = 0x1E;
+				last = 0x1E;
+			}
+			else {
+				first = 0x14;
+				last = 0x1F;
+			}
+			__phy_write(dp83640->phydev, PAGESEL, page);
+		}
+		else {
+			seq_printf(s, "Unknown PAGE[%u]\n", page);
+			return 0;
+		}
+		break;
+
+	case 8:	/* "baseregs" */
+		seq_printf(s, "BASE registers:\n");
+		last = 0x13;
+		break;
+
+	default:
+		seq_printf(s, "Name '%s' is not implemented\n", fname);
+		return 0;
+	}
+
+
+	for (i = first; i <= last; i++) {
+		rdata = __phy_read(dp83640->phydev, i);
+
+		seq_printf(s, "[%02x]=0x%04x\n", i, rdata);
+	}
+
+	phy_unlock_mdio_bus(dp83640->phydev);
+
+	return 0;
+}
+DEFINE_SHOW_ATTRIBUTE(dp83640_regs);
+
+static void dp83640_init_device_debugfs(struct dp83640_private *dp83640)
+{
+	struct dentry *class_root, *device_root, *regent;
+	char debugfs_name[32];
+	char pname[16];
+	unsigned int i;
+
+	class_root = debugfs_lookup("phy", NULL);
+	if (!class_root) {
+		class_root = debugfs_create_dir("phy", NULL);
+	}
+
+	if (IS_ERR(class_root) || !class_root) {
+		pr_warn("failed to create debugfs directory phy\n");
+		return;
+	}
+
+	sprintf(debugfs_name, "%02x", dp83640->phydev->mdio.addr);
+	strcat(debugfs_name, ".dp83640");
+	strcpy(pname, "page");
+
+	device_root = debugfs_create_dir(debugfs_name, class_root);
+
+	if (IS_ERR(device_root) || !device_root) {
+		pr_warn("failed to create debugfs directory for phy/%s\n",
+				debugfs_name);
+		return;
+	}
+
+	regent = debugfs_create_file("baseregs", 0444,
+			    device_root, dp83640, &dp83640_regs_fops);
+
+	regent = debugfs_create_file("ptptime", 0444,
+			    device_root, dp83640, &dp83640_ptptime_fops);
+
+	pname[5] = '\0';
+	for (i = 0; i <= 6; i++) {
+		if (i == 3)
+			continue;
+
+		pname[4] = i | 0x30;
+		debugfs_create_file(pname, 0444,
+				device_root, dp83640, &dp83640_regs_fops);
+	}
+}
+
+#else /* CONFIG_DEBUG_FS */
+
+static void dp83640_init_device_debugfs(struct dp83640_private *dp83640)
+{
+}
+
+#endif /* CONFIG_DEBUG_FS */
 
 static int ptp_dp83640_enable(struct ptp_clock_info *ptp,
 			      struct ptp_clock_request *rq, int on)
@@ -507,9 +821,15 @@ static int ptp_dp83640_enable(struct ptp_clock_info *ptp,
 			else
 				evnt |= EVNT_RISE;
 		}
+#ifdef LE_CUSTOM_MDIO
+		phy_lock_mdio_bus(phydev);
+		ext_page_write(0, phydev, PAGE5, PTP_EVNT, evnt);
+		phy_unlock_mdio_bus(phydev);
+#else
 		mutex_lock(&clock->extreg_lock);
 		ext_write(0, phydev, PAGE5, PTP_EVNT, evnt);
 		mutex_unlock(&clock->extreg_lock);
+#endif
 		return 0;
 
 	case PTP_CLK_REQ_PEROUT:
@@ -548,8 +868,10 @@ static u8 status_frame_src[6] = { 0x08, 0x00, 0x17, 0x0B, 0x6B, 0x0F };
 
 static void enable_status_frames(struct phy_device *phydev, bool on)
 {
+#ifndef LE_CUSTOM_MDIO
 	struct dp83640_private *dp83640 = phydev->priv;
 	struct dp83640_clock *clock = dp83640->clock;
+#endif
 	u16 cfg0 = 0, ver;
 
 	if (on)
@@ -557,12 +879,21 @@ static void enable_status_frames(struct phy_device *phydev, bool on)
 
 	ver = (PSF_PTPVER & VERSIONPTP_MASK) << VERSIONPTP_SHIFT;
 
+#ifdef LE_CUSTOM_MDIO
+	phy_lock_mdio_bus(phydev);
+
+	ext_page_write(0, phydev, PAGE5, PSF_CFG0, cfg0);
+	ext_page_write(0, phydev, PAGE6, PSF_CFG1, ver);
+
+	phy_unlock_mdio_bus(phydev);
+#else
 	mutex_lock(&clock->extreg_lock);
 
 	ext_write(0, phydev, PAGE5, PSF_CFG0, cfg0);
 	ext_write(0, phydev, PAGE6, PSF_CFG1, ver);
 
 	mutex_unlock(&clock->extreg_lock);
+#endif
 
 	if (!phydev->attached_dev) {
 		phydev_warn(phydev,
@@ -616,14 +947,23 @@ static void enable_broadcast(struct phy_device *phydev, int init_page, int on)
 {
 	int val;
 
+#ifdef LE_CUSTOM_MDIO
+	__phy_write(phydev, PAGESEL, 0);
+	val = __phy_read(phydev, PHYCR2);
+#else
 	phy_write(phydev, PAGESEL, 0);
 	val = phy_read(phydev, PHYCR2);
+#endif
 	if (on)
 		val |= BC_WRITE;
 	else
 		val &= ~BC_WRITE;
+#ifdef LE_CUSTOM_MDIO
+	__phy_write(phydev, PHYCR2, val);
+#else
 	phy_write(phydev, PHYCR2, val);
 	phy_write(phydev, PAGESEL, init_page);
+#endif
 }
 
 static void recalibrate(struct dp83640_clock *clock)
@@ -643,22 +983,42 @@ static void recalibrate(struct dp83640_clock *clock)
 		return;
 	}
 
+#ifndef LE_CUSTOM_MDIO
 	mutex_lock(&clock->extreg_lock);
+#endif
 
 	/*
 	 * enable broadcast, disable status frames, enable ptp clock
 	 */
 	list_for_each(this, &clock->phylist) {
 		tmp = list_entry(this, struct dp83640_private, list);
+#ifdef LE_CUSTOM_MDIO
+		phy_lock_mdio_bus(tmp->phydev);
+#endif
 		enable_broadcast(tmp->phydev, clock->page, 1);
 		tmp->cfg0 = ext_read(tmp->phydev, PAGE5, PSF_CFG0);
+#ifdef LE_CUSTOM_MDIO
+		ext_page_write(0, tmp->phydev, PAGE5, PSF_CFG0, 0);
+		ext_page_write(0, tmp->phydev, PAGE4, PTP_CTL, PTP_ENABLE);
+		phy_unlock_mdio_bus(tmp->phydev);
+#else
 		ext_write(0, tmp->phydev, PAGE5, PSF_CFG0, 0);
 		ext_write(0, tmp->phydev, PAGE4, PTP_CTL, PTP_ENABLE);
+#endif
 	}
+#ifdef LE_CUSTOM_MDIO
+	phy_lock_mdio_bus(master);
+#endif
 	enable_broadcast(master, clock->page, 1);
 	cfg0 = ext_read(master, PAGE5, PSF_CFG0);
+#ifdef LE_CUSTOM_MDIO
+	ext_page_write(0, master, PAGE5, PSF_CFG0, 0);
+	ext_page_write(0, master, PAGE4, PTP_CTL, PTP_ENABLE);
+	phy_unlock_mdio_bus(master);
+#else
 	ext_write(0, master, PAGE5, PSF_CFG0, 0);
 	ext_write(0, master, PAGE4, PTP_CTL, PTP_ENABLE);
+#endif
 
 	/*
 	 * enable an event timestamp
@@ -669,9 +1029,20 @@ static void recalibrate(struct dp83640_clock *clock)
 
 	list_for_each(this, &clock->phylist) {
 		tmp = list_entry(this, struct dp83640_private, list);
+#ifdef LE_CUSTOM_MDIO
+		phy_lock_mdio_bus(tmp->phydev);
+		ext_page_write(0, tmp->phydev, PAGE5, PTP_EVNT, evnt);
+		phy_unlock_mdio_bus(tmp->phydev);
+#else
 		ext_write(0, tmp->phydev, PAGE5, PTP_EVNT, evnt);
+#endif
 	}
+#ifdef LE_CUSTOM_MDIO
+	phy_lock_mdio_bus(master);
+	ext_page_write(0, master, PAGE5, PTP_EVNT, evnt);
+#else
 	ext_write(0, master, PAGE5, PTP_EVNT, evnt);
+#endif
 
 	/*
 	 * configure a trigger
@@ -679,46 +1050,95 @@ static void recalibrate(struct dp83640_clock *clock)
 	ptp_trig = TRIG_WR | TRIG_IF_LATE | TRIG_PULSE;
 	ptp_trig |= (trigger  & TRIG_CSEL_MASK) << TRIG_CSEL_SHIFT;
 	ptp_trig |= (cal_gpio & TRIG_GPIO_MASK) << TRIG_GPIO_SHIFT;
+#ifdef LE_CUSTOM_MDIO
+	ext_page_write(0, master, PAGE5, PTP_TRIG, ptp_trig);
+#else
 	ext_write(0, master, PAGE5, PTP_TRIG, ptp_trig);
+#endif
 
 	/* load trigger */
 	val = (trigger & TRIG_SEL_MASK) << TRIG_SEL_SHIFT;
 	val |= TRIG_LOAD;
+#ifdef LE_CUSTOM_MDIO
+	ext_page_write(0, master, PAGE4, PTP_CTL, val);
+#else
 	ext_write(0, master, PAGE4, PTP_CTL, val);
+#endif
 
 	/* enable trigger */
 	val &= ~TRIG_LOAD;
 	val |= TRIG_EN;
+#ifdef LE_CUSTOM_MDIO
+	ext_page_write(0, master, PAGE4, PTP_CTL, val);
+#else
 	ext_write(0, master, PAGE4, PTP_CTL, val);
+#endif
 
 	/* disable trigger */
 	val = (trigger & TRIG_SEL_MASK) << TRIG_SEL_SHIFT;
 	val |= TRIG_DIS;
+#ifdef LE_CUSTOM_MDIO
+	ext_page_write(0, master, PAGE4, PTP_CTL, val);
+#else
 	ext_write(0, master, PAGE4, PTP_CTL, val);
+#endif
 
 	/*
 	 * read out and correct offsets
 	 */
 	val = ext_read(master, PAGE4, PTP_STS);
 	phydev_info(master, "master PTP_STS  0x%04hx\n", val);
+#ifdef LE_CUSTOM_MDIO
+	val = __phy_read(master, PTP_ESTS);
+#else
 	val = ext_read(master, PAGE4, PTP_ESTS);
+#endif
 	phydev_info(master, "master PTP_ESTS 0x%04hx\n", val);
+#ifdef LE_CUSTOM_MDIO
+	event_ts.ns_lo  = __phy_read(master, PTP_EDATA);
+	event_ts.ns_hi  = __phy_read(master, PTP_EDATA);
+	event_ts.sec_lo = __phy_read(master, PTP_EDATA);
+	event_ts.sec_hi = __phy_read(master, PTP_EDATA);
+	phy_unlock_mdio_bus(master);
+#else
 	event_ts.ns_lo  = ext_read(master, PAGE4, PTP_EDATA);
 	event_ts.ns_hi  = ext_read(master, PAGE4, PTP_EDATA);
 	event_ts.sec_lo = ext_read(master, PAGE4, PTP_EDATA);
 	event_ts.sec_hi = ext_read(master, PAGE4, PTP_EDATA);
+#endif
 	now = phy2txts(&event_ts);
 
 	list_for_each(this, &clock->phylist) {
 		tmp = list_entry(this, struct dp83640_private, list);
+#ifdef LE_CUSTOM_MDIO
+		phy_lock_mdio_bus(tmp->phydev);
+#endif
 		val = ext_read(tmp->phydev, PAGE4, PTP_STS);
+#ifdef LE_CUSTOM_MDIO
+		phy_unlock_mdio_bus(tmp->phydev);
+#endif
 		phydev_info(tmp->phydev, "slave  PTP_STS  0x%04hx\n", val);
+#ifdef LE_CUSTOM_MDIO
+		phy_lock_mdio_bus(tmp->phydev);
+		val = __phy_read(tmp->phydev, PTP_ESTS);
+		phy_unlock_mdio_bus(tmp->phydev);
+#else
 		val = ext_read(tmp->phydev, PAGE4, PTP_ESTS);
+#endif
 		phydev_info(tmp->phydev, "slave  PTP_ESTS 0x%04hx\n", val);
+#ifdef LE_CUSTOM_MDIO
+		phy_lock_mdio_bus(tmp->phydev);
+		event_ts.ns_lo  = __phy_read(tmp->phydev, PTP_EDATA);
+		event_ts.ns_hi  = __phy_read(tmp->phydev, PTP_EDATA);
+		event_ts.sec_lo = __phy_read(tmp->phydev, PTP_EDATA);
+		event_ts.sec_hi = __phy_read(tmp->phydev, PTP_EDATA);
+		phy_unlock_mdio_bus(tmp->phydev);
+#else
 		event_ts.ns_lo  = ext_read(tmp->phydev, PAGE4, PTP_EDATA);
 		event_ts.ns_hi  = ext_read(tmp->phydev, PAGE4, PTP_EDATA);
 		event_ts.sec_lo = ext_read(tmp->phydev, PAGE4, PTP_EDATA);
 		event_ts.sec_hi = ext_read(tmp->phydev, PAGE4, PTP_EDATA);
+#endif
 		diff = now - (s64) phy2txts(&event_ts);
 		phydev_info(tmp->phydev, "slave offset %lld nanoseconds\n",
 			    diff);
@@ -732,11 +1152,23 @@ static void recalibrate(struct dp83640_clock *clock)
 	 */
 	list_for_each(this, &clock->phylist) {
 		tmp = list_entry(this, struct dp83640_private, list);
+#ifdef LE_CUSTOM_MDIO
+		phy_lock_mdio_bus(tmp->phydev);
+		ext_page_write(0, tmp->phydev, PAGE5, PSF_CFG0, tmp->cfg0);
+		phy_unlock_mdio_bus(tmp->phydev);
+#else
 		ext_write(0, tmp->phydev, PAGE5, PSF_CFG0, tmp->cfg0);
+#endif
 	}
+#ifdef LE_CUSTOM_MDIO
+	phy_lock_mdio_bus(master);
+	ext_page_write(0, master, PAGE5, PSF_CFG0, cfg0);
+	phy_unlock_mdio_bus(master);
+#else
 	ext_write(0, master, PAGE5, PSF_CFG0, cfg0);
 
 	mutex_unlock(&clock->extreg_lock);
+#endif
 }
 
 /* time stamping methods */
@@ -984,7 +1416,9 @@ static void dp83640_free_clocks(void)
 			BUG();
 		}
 		list_del(&clock->list);
+#ifndef LE_CUSTOM_MDIO
 		mutex_destroy(&clock->extreg_lock);
+#endif
 		mutex_destroy(&clock->clock_lock);
 		put_device(&clock->bus->dev);
 		kfree(clock->caps.pin_config);
@@ -998,7 +1432,9 @@ static void dp83640_clock_init(struct dp83640_clock *clock, struct mii_bus *bus)
 {
 	INIT_LIST_HEAD(&clock->list);
 	clock->bus = bus;
+#ifndef LE_CUSTOM_MDIO
 	mutex_init(&clock->extreg_lock);
+#endif
 	mutex_init(&clock->clock_lock);
 	INIT_LIST_HEAD(&clock->phylist);
 	clock->caps.owner = THIS_MODULE;
@@ -1025,6 +1461,7 @@ static void dp83640_clock_init(struct dp83640_clock *clock, struct mii_bus *bus)
 	get_device(&bus->dev);
 }
 
+#ifndef LE_OWN_CLOCK
 static int choose_this_phy(struct dp83640_clock *clock,
 			   struct phy_device *phydev)
 {
@@ -1036,6 +1473,7 @@ static int choose_this_phy(struct dp83640_clock *clock,
 
 	return 0;
 }
+#endif
 
 static struct dp83640_clock *dp83640_clock_get(struct dp83640_clock *clock)
 {
@@ -1050,11 +1488,15 @@ static struct dp83640_clock *dp83640_clock_get(struct dp83640_clock *clock)
  */
 static struct dp83640_clock *dp83640_clock_get_bus(struct mii_bus *bus)
 {
-	struct dp83640_clock *clock = NULL, *tmp;
+	struct dp83640_clock *clock = NULL;
+#ifndef LE_OWN_CLOCK
+	struct dp83640_clock *tmp;
 	struct list_head *this;
+#endif
 
 	mutex_lock(&phyter_clocks_lock);
 
+#ifndef LE_OWN_CLOCK
 	list_for_each(this, &phyter_clocks) {
 		tmp = list_entry(this, struct dp83640_clock, list);
 		if (tmp->bus == bus) {
@@ -1064,6 +1506,7 @@ static struct dp83640_clock *dp83640_clock_get_bus(struct mii_bus *bus)
 	}
 	if (clock)
 		goto out;
+#endif
 
 	clock = kzalloc(sizeof(struct dp83640_clock), GFP_KERNEL);
 	if (!clock)
@@ -1107,25 +1550,198 @@ static int dp83640_soft_reset(struct phy_device *phydev)
 	return 0;
 }
 
+#ifdef LE_OVERRIDE_LINK_CHANGE
+
+static void dp83640_phy_link_change(struct phy_device *phydev, bool up)
+{
+	struct dp83640_private *dp83640 = phydev->priv;
+	int val;
+
+	phy_lock_mdio_bus(phydev);
+	val = ext_read(phydev, PAGE0, LEDCR);
+	if (val < 0)
+		goto out;
+
+	if (up)
+		val &= ~DIS_SPDLED;
+	else
+		val |= DIS_SPDLED;
+
+	ext_write(0, phydev, LEDCR, val);
+
+out:
+	phy_unlock_mdio_bus(phydev);
+	dp83640->phy_link_change(phydev, up);
+}
+
+#endif
+
+static int dp83640_of_clock_init(struct dp83640_private *dp83640)
+{
+	struct phy_device *phydev = dp83640->phydev;
+	struct device *dev = &phydev->mdio.dev;
+	struct device_node *of_node = dev->of_node;
+	int ret, per;
+	u32 val;
+
+	/* TODO perhaps move these to a separate PTP node? */
+	if (!of_property_read_u32(of_node, "dp83640,broadcast", &val)) {
+		if (val) {
+			dp83640->flags |= DP83640_FLAG_BROADCAST;
+		}
+	}
+
+	if (!of_property_read_u32(of_node, "dp83640,ptp-byteoffset", &val)) {
+		phy_lock_mdio_bus(phydev);
+		ext_page_write(0, phydev, PAGE6, PTP_OFF, val);
+		phy_unlock_mdio_bus(phydev);
+	}
+
+	/* HSR EtherType 0x892f can be used here (0x88a8 = VLAN 802.1ad for testing) */
+	if (!of_property_read_u32(of_node, "dp83640,ptp-ethertype", &val)) {
+		phy_lock_mdio_bus(phydev);
+		val = htons(val);
+		ext_page_write(0, phydev, PAGE6, PTP_ETR, val);
+		phy_unlock_mdio_bus(phydev);
+	}
+
+
+	ret = of_property_read_u32(of_node, "dp83640,clkout-div", &val);
+	per = of_property_read_u32(of_node, "dp83640,clkin-period", &val);
+
+	if (ret && per)
+		return 0;
+
+	if (!ret && !per) {
+		phydev_warn(phydev, "dp83640,clkin-period and dp83640,clkout-div must not be used both on the same PHY\n");
+		return 0;
+	}
+
+	if (per) {
+		if ((val < 2) || (val > 255)) {
+			phydev_warn(phydev, "Invalid dp83640,clkout-div value %u must be within a range 2..255\n",
+					val);
+			return 0;
+		}
+	}
+	else {
+		if ((val < 8) || (val > 127)) {
+			phydev_warn(phydev, "Invalid dp83640,clkin-period value %u must be within a range 8..127\n",
+					val);
+			return 0;
+		}
+	}
+
+	phy_lock_mdio_bus(phydev);
+	ret = __phy_write(phydev, PAGESEL, PAGE6);
+	if (ret < 0)
+		goto out;
+
+	if (per) {
+		val |= PTP_CLKOUT_EN | PTP_CLKOUT_SEL;
+		ret = __phy_write(phydev, PTP_COC, val);
+	}
+	else {
+		val |= 0x02 << CLK_SRC_SHIFT;
+		ret = __phy_write(phydev, PTP_CLKSRC, val);
+	}
+
+out:
+	phy_unlock_mdio_bus(phydev);
+	return ret;
+}
+
+static int dp83640_of_led_init(struct dp83640_private *dp83640)
+{
+	struct phy_device *phydev = dp83640->phydev;
+	struct device *dev = &phydev->mdio.dev;
+	struct device_node *of_node = dev->of_node;
+	u32 ledmode;
+	int val, ret;
+
+	if (of_property_read_u32(of_node, "dp83640,ledmode", &ledmode))
+		return 0;
+
+	if ((ledmode < 1) || (ledmode > 3)) {
+		phydev_warn(phydev, "Invalid dp83640,ledmode value %u must be within a range 1..3\n",
+				val);
+		return 0;
+	}
+
+	switch (ledmode) {
+	case 2:
+		ledmode = 0;
+		break;
+	case 3:
+		ledmode = 2;
+		break;
+	default:
+		break;
+	}
+
+	phy_lock_mdio_bus(phydev);
+	ret = __phy_write(phydev, PAGESEL, PAGE0);
+	if (ret < 0)
+		goto out;
+
+	val = __phy_read(phydev, PHYCR);
+	if (val < 0) {
+		ret = val;
+		goto out;
+	}
+
+	val &= ~LED_CNFG_MASK;
+	val |= (ledmode << LED_CNFG_SHIFT);
+
+	ret = __phy_write(phydev, PHYCR, val);
+
+out:
+	phy_unlock_mdio_bus(phydev);
+	return ret;
+}
+
 static int dp83640_config_init(struct phy_device *phydev)
 {
 	struct dp83640_private *dp83640 = phydev->priv;
 	struct dp83640_clock *clock = dp83640->clock;
 
+	dp83640_of_led_init(dp83640);
+	dp83640_of_clock_init(dp83640);
+
+#ifdef LE_OVERRIDE_LINK_CHANGE
+	if (phydev->phy_link_change) {
+		dp83640->phy_link_change = phydev->phy_link_change;
+		phydev->phy_link_change = dp83640_phy_link_change;
+	}
+#endif
+
 	if (clock->chosen && !list_empty(&clock->phylist))
 		recalibrate(clock);
 	else {
+#ifdef LE_CUSTOM_MDIO
+		phy_lock_mdio_bus(phydev);
+#else
 		mutex_lock(&clock->extreg_lock);
+#endif
 		enable_broadcast(phydev, clock->page, 1);
+#ifdef LE_CUSTOM_MDIO
+		phy_unlock_mdio_bus(phydev);
+#else
 		mutex_unlock(&clock->extreg_lock);
+#endif
 	}
 
 	enable_status_frames(phydev, true);
 
+#ifdef LE_CUSTOM_MDIO
+	phy_lock_mdio_bus(phydev);
+	ext_page_write(0, phydev, PAGE4, PTP_CTL, PTP_ENABLE);
+	phy_unlock_mdio_bus(phydev);
+#else
 	mutex_lock(&clock->extreg_lock);
 	ext_write(0, phydev, PAGE4, PTP_CTL, PTP_ENABLE);
 	mutex_unlock(&clock->extreg_lock);
-
+#endif
 	return 0;
 }
 
@@ -1292,12 +1908,21 @@ static int dp83640_hwtstamp(struct mii_timestamper *mii_ts, struct ifreq *ifr)
 	if (dp83640->hwts_rx_en)
 		rxcfg0 |= RX_TS_EN;
 
+#ifdef LE_CUSTOM_MDIO
+	phy_lock_mdio_bus(dp83640->phydev);
+
+	ext_page_write(0, dp83640->phydev, PAGE5, PTP_TXCFG0, txcfg0);
+	ext_write(0, dp83640->phydev, PTP_RXCFG0, rxcfg0);
+
+	phy_unlock_mdio_bus(dp83640->phydev);
+#else
 	mutex_lock(&dp83640->clock->extreg_lock);
 
 	ext_write(0, dp83640->phydev, PAGE5, PTP_TXCFG0, txcfg0);
 	ext_write(0, dp83640->phydev, PAGE5, PTP_RXCFG0, rxcfg0);
 
 	mutex_unlock(&dp83640->clock->extreg_lock);
+#endif
 
 	return copy_to_user(ifr->ifr_data, &cfg, sizeof(cfg)) ? -EFAULT : 0;
 }
@@ -1445,6 +2070,10 @@ static int dp83640_probe(struct phy_device *phydev)
 		goto no_memory;
 
 	dp83640->phydev = phydev;
+	phydev->priv = dp83640;
+
+	dp83640_init_device_debugfs(dp83640);
+
 	dp83640->mii_ts.rxtstamp = dp83640_rxtstamp;
 	dp83640->mii_ts.txtstamp = dp83640_txtstamp;
 	dp83640->mii_ts.hwtstamp = dp83640_hwtstamp;
@@ -1457,7 +2086,6 @@ static int dp83640_probe(struct phy_device *phydev)
 		list_add(&dp83640->rx_pool_data[i].list, &dp83640->rxpool);
 
 	phydev->mii_ts = &dp83640->mii_ts;
-	phydev->priv = dp83640;
 
 	spin_lock_init(&dp83640->rx_lock);
 	skb_queue_head_init(&dp83640->rx_queue);
@@ -1465,7 +2093,9 @@ static int dp83640_probe(struct phy_device *phydev)
 
 	dp83640->clock = clock;
 
+#ifndef LE_OWN_CLOCK
 	if (choose_this_phy(clock, phydev)) {
+#endif
 		clock->chosen = dp83640;
 		clock->ptp_clock = ptp_clock_register(&clock->caps,
 						      &phydev->mdio.dev);
@@ -1473,8 +2103,10 @@ static int dp83640_probe(struct phy_device *phydev)
 			err = PTR_ERR(clock->ptp_clock);
 			goto no_register;
 		}
+#ifndef LE_OWN_CLOCK
 	} else
 		list_add_tail(&dp83640->list, &clock->phylist);
+#endif
 
 	dp83640_clock_put(clock);
 	return 0;

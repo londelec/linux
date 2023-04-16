@@ -5,7 +5,9 @@
 #ifndef HAVE_DP83640_REGISTERS
 #define HAVE_DP83640_REGISTERS
 
-/* #define PAGE0                  0x0000 */
+#define PAGE0                     0x0000
+#define LEDCR	                  0x0018 /* LED Direct Control Register */
+#define PHYCR                     0x0019 /* PHY Control Register */
 #define PHYCR2                    0x001c /* PHY Control Register 2 */
 
 #define PAGE4                     0x0004
@@ -49,6 +51,13 @@
 #define PTP_OFF                   0x001d /* PTP Offset Register */
 #define PTP_GPIOMON               0x001e /* PTP GPIO Monitor Register */
 #define PTP_RXHASH                0x001f /* PTP Receive Hash Register */
+
+/* Bit definitions for the LEDCR register */
+#define DIS_SPDLED                (1<<11) /* Disable LED_SPEED output */
+
+/* Bit definitions for the PHYCR register */
+#define LED_CNFG_MASK             (0x60)
+#define LED_CNFG_SHIFT            (5)     /* LED Configuration mode */
 
 /* Bit definitions for the PHYCR2 register */
 #define BC_WRITE                  (1<<11) /* Broadcast Write Enable */
