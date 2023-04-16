@@ -1,0 +1,223 @@
+// SPDX-License-Identifier: GPL-2.0+
+//
+// Copyright 2015 Londelec UK Ltd.
+
+
+/dts-v1/;
+#include "imx28.dtsi"
+
+/ {
+	model = "LONDELEC RTU";
+	compatible = "denx,m28evk", "fsl,imx28";
+
+	memory@40000000 {
+		device_type = "memory";
+		reg = <0x40000000 0x08000000>;
+	};
+
+	apb@80000000 {
+		apbh@80000000 {
+			nand-controller@8000c000 {
+				pinctrl-names = "default";
+				pinctrl-0 = <&gpmi_pins_a &gpmi_status_cfg>;
+				status = "okay";
+
+				partition@0 {
+					label = "bootloader";
+					reg = <0x00000000 0x00300000>;
+					read-only;
+				};
+
+				partition@1 {
+					label = "environment";
+					reg = <0x00300000 0x00080000>;
+				};
+
+				partition@2 {
+					label = "redundant-environment";
+					reg = <0x00380000 0x00080000>;
+				};
+
+				partition@3 {
+					label = "kernel";
+					reg = <0x00400000 0x00400000>;
+				};
+
+				partition@4 {
+					label = "filesystem";
+					reg = <0x00800000 0x0f800000>;
+				};
+			};
+
+			ssp0: spi@80010000 {
+				compatible = "fsl,imx28-mmc";
+				pinctrl-names = "default";
+				pinctrl-0 = <&mmc0_4bit_pins_a
+					     &mmc0_cd_cfg
+					     &mmc0_sck_cfg>;
+				bus-width = <4>;
+				/*
+				 * Write protect gpio and power control is disabled.
+				 * wp-gpios = <&gpio3 10 0>;
+				 * vmmc-supply = <&reg_vddio_sd0>;
+				 */
+				status = "okay";
+			};
+
+			pinctrl@80018000 {
+				pinctrl-names = "default";
+				pinctrl-0 = <&hog_pins_a>;
+
+				hog_pins_a: hog@0 {
+					reg = <0>;
+					fsl,pinmux-ids = <
+						/* MX28_PAD_PWM3__GPIO_3_28 */	/* Ethernet PHY reset */
+						MX28_PAD_PWM4__GPIO_3_29		/* MU609 power gate */
+						MX28_PAD_AUART0_RTS__GPIO_3_3		/* COM1 RTS */
+						MX28_PAD_AUART1_RTS__GPIO_3_7		/* COM2 RTS */
+
+						MX28_PAD_LCD_RD_E__GPIO_1_24		/* COM1 RS232 enable */
+						MX28_PAD_LCD_WR_RWN__GPIO_1_25	/* COM1 RS485_P[12] RX enable */
+						MX28_PAD_LCD_CS__GPIO_1_27		/* COM1 RS485_P[12] TX enable */
+						MX28_PAD_LCD_VSYNC__GPIO_1_28		/* COM1 RS485_P[34] RX enable */
+						MX28_PAD_LCD_HSYNC__GPIO_1_29		/* COM1 RS485_P[34] TX enable */
+
+						MX28_PAD_LCD_D07__GPIO_1_7		/* COM2 RS232 enable */
+						MX28_PAD_LCD_D08__GPIO_1_8		/* COM2 RS485_P[12] RX enable */
+						MX28_PAD_LCD_D09__GPIO_1_9		/* COM2 RS485_P[12] TX enable */
+						MX28_PAD_LCD_D10__GPIO_1_10		/* COM2 RS485_P[34] RX enable */
+						MX28_PAD_LCD_D11__GPIO_1_11		/* COM2 RS485_P[34] TX enable */
+
+						MX28_PAD_LCD_D12__GPIO_1_12		/* COM3 RS232 enable */
+						MX28_PAD_LCD_D13__GPIO_1_13		/* COM3 RS485_P[12] RX enable */
+						MX28_PAD_LCD_D14__GPIO_1_14		/* COM3 RS485_P[12] TX enable */
+						MX28_PAD_LCD_D15__GPIO_1_15		/* COM3 RS485_P[34] RX enable */
+						MX28_PAD_LCD_D16__GPIO_1_16		/* COM3 RS485_P[34] TX enable */
+					>;
+					fsl,drive-strength = <MXS_DRIVE_4mA>;
+					fsl,voltage = <MXS_VOLTAGE_HIGH>;
+					fsl,pull-up = <MXS_PULL_DISABLE>;
+				};
+
+				led_pin_gpio2_26: led_gpio2_26@0 {
+					reg = <0>;
+					fsl,pinmux-ids = <
+						MX28_PAD_SSP3_MISO__GPIO_2_26		/* Heartbeat LED */
+					>;
+					fsl,drive-strength = <MXS_DRIVE_4mA>;
+					fsl,voltage = <MXS_VOLTAGE_HIGH>;
+					fsl,pull-up = <MXS_PULL_DISABLE>;
+				};
+			};
+		};
+
+		apbx@80040000 {
+			i2c0: i2c@80058000 {
+				pinctrl-names = "default";
+				pinctrl-0 = <&i2c0_pins_a>;
+				status = "okay";
+
+				rtc: rtc@68 {
+					compatible = "stm,m41t62";
+					reg = <0x68>;
+				};
+			};
+
+			duart: serial@80074000 {
+				pinctrl-names = "default";
+				pinctrl-0 = <&duart_pins_a>;
+				status = "okay";
+			};
+
+			usbphy1: usbphy@8007e000 {
+				status = "okay";
+			};
+
+			auart0: serial@8006a000 {
+				pinctrl-names = "default";
+				pinctrl-0 = <&auart0_2pins_a>;
+				status = "okay";
+			};
+
+			auart1: serial@8006c000 {
+				pinctrl-names = "default";
+				pinctrl-0 = <&auart1_2pins_a>;
+				status = "okay";
+			};
+
+			auart2: serial@8006e000 {
+				pinctrl-names = "default";
+				pinctrl-0 = <&auart2_2pins_b>;
+				status = "okay";
+			};
+
+			auart3: serial@80070000 {
+				pinctrl-names = "default";
+				pinctrl-0 = <&auart3_2pins_b>;
+				status = "okay";
+			};
+		};
+	};
+
+	ahb@80080000 {
+		usb1: usb@80090000 {
+			/*
+			 * USB power and gpios are not used.
+			 * vbus-supply = <&reg_usb1_vbus>;
+			 * pinctrl-names = "default";
+			 * pinctrl-0 = <&usb1_pins_a>;
+			 */
+			status = "okay";
+		};
+
+		mac0: ethernet@800f0000 {
+			phy-mode = "rmii";
+			pinctrl-names = "default";
+			pinctrl-0 = <&mac0_pins_a>;
+			clocks = <&clks 57>, <&clks 57>;
+			clock-names = "ipg", "ahb";
+			/* 
+			 * Tested and can be used
+			 * phy-reset-gpios = <&gpio3 28 GPIO_ACTIVE_LOW>;
+			 * phy-reset-duration = <100>;
+			 */
+			phy-handle = <&phy0>;
+			status = "okay";
+
+			/* LAN8720 PHYs on the MDIO bus are assigned to MACs 28/01/2021 */
+			mdio@800f0000 {
+				#address-cells = <1>;
+				#size-cells = <0>;
+
+				phy0: phy@0 {
+					reg = <10>;
+					/* 
+					 * LED mode 2 set by bootstrap resistor.
+					 * dp83640,ledmode = <2>;
+					 * Enable 125 MHz clock output on CLK_OUT
+					 * dp83640,clkout-div = <2>;
+					 */
+					dp83640,broadcast = <1>;
+				};
+
+				phy1: phy@1 {
+					reg = <3>;
+					/* 
+					 * LED mode 2 set by bootstrap resistor.
+					 * dp83640,ledmode = <2>;
+					 * Enable external clock source from CLK_OUT (125 MHz; 8ns)
+					 * dp83640,clkin-period = <8>;
+					 */
+				};
+			};
+		};
+
+		mac1: ethernet@800f4000 {
+			phy-mode = "rmii";
+			pinctrl-names = "default";
+			pinctrl-0 = <&mac1_pins_a>;
+			phy-handle = <&phy1>;
+			status = "okay";
+		};
+	};
+};
