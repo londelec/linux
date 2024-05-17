@@ -1122,6 +1122,9 @@ static void mxs_user_rs485_isr(struct mxs_auart_port *s, u32 istat)
 
 	/*
 	 * Discard all echoed data
+	 * Warning, this must be done only after RX TIMEOUT IRQ occurs!
+	 * The CPU does not generate AUART_INTR_RTIS interrupt if the RX FIFO is empty
+	 * and this means RS485 RTS may remain active.
 	 */
 	while (1) {
 		stat = mxs_read(s, REG_STAT);
@@ -1131,18 +1134,6 @@ static void mxs_user_rs485_isr(struct mxs_auart_port *s, u32 istat)
 	}
 
 	mxs_write(0, s, REG_STAT);
-
-	/*
-	 * Unlikely, but just in case RX FIFO interrupt occurs
-	 * before RX timeout interrupt.
-	 * Used to be:
-	 *	if (istat & AUART_INTR_RTIS)
-	 *		return;
-	 */
-	if (
-			(istat & AUART_INTR_RXIS) &&
-			((stat & (AUART_STAT_TXFE | AUART_STAT_BUSY)) != AUART_STAT_TXFE))
-		return;
 
 	s->port.rs485.flags &= ~MXS_AUART_RS485_RTS_ACT;
 	mxs_user_rs485_change(s, s->port.rs485.flags & SER_RS485_RTS_AFTER_SEND);
@@ -1188,18 +1179,20 @@ static irqreturn_t mxs_auart_irq_handle(int irq, void *context)
 		istat &= ~AUART_INTR_CTSMIS;
 	}
 
-	if (istat & (AUART_INTR_RTIS | AUART_INTR_RXIS)) {
 #ifdef MXS_USER_GPIO_RS485_RTS
-		if (s->port.rs485.flags & MXS_AUART_RS485_RTS_ACT) {
-			 mxs_user_rs485_isr(s, istat);
-		} else {
+	if (s->port.rs485.flags & MXS_AUART_RS485_RTS_ACT) {
+		if (istat & AUART_INTR_RTIS)
+			mxs_user_rs485_isr(s, istat);
+	}
+	else {
 #endif
+		if (istat & (AUART_INTR_RTIS | AUART_INTR_RXIS)) {
 			if (!auart_dma_enabled(s))
 				mxs_auart_rx_chars(s);
+		istat &= ~(AUART_INTR_RTIS | AUART_INTR_RXIS);
 #ifdef MXS_USER_GPIO_RS485_RTS
 		}
 #endif
-		istat &= ~(AUART_INTR_RTIS | AUART_INTR_RXIS);
 	}
 
 	if (istat & AUART_INTR_TXIS) {
